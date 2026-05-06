@@ -64,7 +64,6 @@ path = "src/lib.rs"
 # name = "e2e_tui"
 # path = "tests/e2e_tui.rs"
 
-# TODO: re-enable in Task 13
-# [[test]]
-# name = "cache_integration"
-# path = "tests/cache_integration.rs"
+[[test]]
+name = "cache_integration"
+path = "tests/cache_integration.rs"
