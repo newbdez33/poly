@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
     // Forward Refresher status into app event channel
     let event_tx_status = event_tx.clone();
     let shutdown_status = shutdown.clone();
-    tokio::spawn(async move {
+    let h_status = tokio::spawn(async move {
         loop {
             tokio::select! {
                 _ = shutdown_status.cancelled() => break,
@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Cleanup
     shutdown.cancel();
-    let _ = tokio::join!(h_refresh, h_input);
+    let _ = tokio::join!(h_refresh, h_input, h_status);
 
     app_result
 }

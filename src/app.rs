@@ -61,11 +61,12 @@ pub fn handle_event(state: &mut AppState, ev: AppEvent, cmd_tx: &mpsc::Sender<Cm
 /// One tick of the main loop. Reads cache, updates state, returns the new state.
 /// Exposed for tests to drive the loop deterministically.
 pub async fn tick_once(state: &mut AppState, cache: &dyn BalanceCache) {
-    match cache.get().await {
-        Ok(Some(b)) => { state.balance = Some(b); state.redis_ok = true; }
-        Ok(None) => { state.redis_ok = true; /* keep last balance */ }
-        Err(_) => { state.redis_ok = false; }
+    state.redis_ok = cache.ping().await.is_ok();
+
+    if let Ok(Some(b)) = cache.get().await {
+        state.balance = Some(b);
     }
+    // Ok(None) and Err(_) both leave the last known balance untouched.
 }
 
 pub async fn run<B: Backend>(
@@ -125,7 +126,10 @@ mod tests {
         async fn set(&self, b: &Balance) -> Result<(), crate::domain::CacheError> {
             *self.state.lock().unwrap() = Some(b.clone()); Ok(())
         }
-        async fn ping(&self) -> Result<(), crate::domain::CacheError> { Ok(()) }
+        async fn ping(&self) -> Result<(), crate::domain::CacheError> {
+            if *self.fail.lock().unwrap() { return Err(crate::domain::CacheError::Disconnected); }
+            Ok(())
+        }
     }
 
     fn key(c: char) -> AppEvent {
@@ -186,5 +190,17 @@ mod tests {
         tick_once(&mut s, cache.as_ref()).await;          // now errors
         assert_eq!(s.balance.unwrap().usdc, b.usdc);      // still there
         assert!(!s.redis_ok);                             // but flagged
+    }
+
+    #[tokio::test]
+    async fn redis_ok_reflects_ping_not_get_none() {
+        let cache = MemCache::new();           // empty cache
+        let mut s = AppState::new(Duration::from_secs(30));
+        tick_once(&mut s, cache.as_ref()).await;
+        assert!(s.redis_ok, "ping ok with empty cache should be green");
+
+        *cache.fail.lock().unwrap() = true;
+        tick_once(&mut s, cache.as_ref()).await;
+        assert!(!s.redis_ok, "ping fail should be red");
     }
 }
