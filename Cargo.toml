@@ -1,0 +1,70 @@
+[package]
+name = "poly-tui"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+async-trait = "0.1"
+futures = "0.3"
+
+ratatui = "0.29"
+crossterm = "0.28"
+
+# polymarket-client-sdk-v2 is published as polymarket_client_sdk_v2 on crates.io
+# NOTE: polymarket_client_sdk_v2 pulls in alloy 1.6.x; alloy = "0.8" conflicts via c-kzg native link.
+# We match the transitive alloy version to avoid duplicate native lib conflict.
+polymarket_client_sdk_v2 = "0.6.0-canary.1"
+alloy = { version = "1", features = ["signer-local"] }
+
+fred = { version = "9", features = ["enable-rustls"] }
+
+rust_decimal = { version = "1", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+dotenvy = "0.15"
+envy = "0.4"
+
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+[dev-dependencies]
+cucumber = { version = "0.21", features = ["macros"] }
+mockall = "0.13"
+insta = { version = "1", features = ["yaml"] }
+wiremock = "0.6"
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["redis"] }
+tokio-test = "0.4"
+serde_json = "1"
+tempfile = "3"
+
+[[bin]]
+name = "poly-tui"
+path = "src/bin/poly-tui.rs"
+
+[lib]
+path = "src/lib.rs"
+
+# TODO: re-enable in Task 12
+# [[test]]
+# name = "bdd"
+# path = "tests/bdd.rs"
+# harness = false
+
+# TODO: re-enable in Task 13
+# [[test]]
+# name = "e2e_tui"
+# path = "tests/e2e_tui.rs"
+
+# TODO: re-enable in Task 13
+# [[test]]
+# name = "cache_integration"
+# path = "tests/cache_integration.rs"
