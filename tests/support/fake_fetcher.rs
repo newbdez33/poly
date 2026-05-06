@@ -6,6 +6,7 @@ use rust_decimal::Decimal;
 use std::str::FromStr;
 use std::sync::{Mutex, atomic::{AtomicUsize, Ordering}};
 
+#[derive(Debug)]
 pub struct FakeFetcher {
     balance: Mutex<Decimal>,
     fail: Mutex<bool>,

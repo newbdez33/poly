@@ -53,11 +53,10 @@ path = "src/bin/poly-tui.rs"
 [lib]
 path = "src/lib.rs"
 
-# TODO: re-enable in Task 12
-# [[test]]
-# name = "bdd"
-# path = "tests/bdd.rs"
-# harness = false
+[[test]]
+name = "bdd"
+path = "tests/bdd.rs"
+harness = false
 
 # TODO: re-enable in Task 13
 # [[test]]

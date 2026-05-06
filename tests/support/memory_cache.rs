@@ -3,7 +3,7 @@ use poly_tui::cache::BalanceCache;
 use poly_tui::domain::{Balance, CacheError};
 use std::sync::Mutex;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct InMemoryCache {
     state: Mutex<Option<Balance>>,
     pub fail_next_get: Mutex<bool>,
