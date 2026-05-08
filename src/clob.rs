@@ -44,15 +44,21 @@ pub struct ClobBalanceFetcher {
 impl ClobBalanceFetcher {
     pub async fn connect(host: &str, private_key: &str) -> Result<Self, FetchError> {
         use polymarket_client_sdk_v2::clob::{Client, Config};
+        use polymarket_client_sdk_v2::clob::types::SignatureType;
         use polymarket_client_sdk_v2::POLYGON;
 
         let signer = LocalSigner::from_str(private_key)
             .map_err(|e| FetchError::Decode(format!("invalid private key: {e}")))?
             .with_chain_id(Some(POLYGON));
 
+        // SignatureType::Proxy (= 1) — for Polymarket accounts created via email/Magic
+        // login. The funder address (where USDC lives) is a Polymarket Proxy contract,
+        // auto-derived via CREATE2 from the EOA. Use SignatureType::GnosisSafe (= 2)
+        // instead if you signed up by connecting an external browser wallet.
         let client = Client::new(host, Config::default())
             .map_err(|e| FetchError::Network(e.to_string()))?
             .authentication_builder(&signer)
+            .signature_type(SignatureType::Proxy)
             .authenticate()
             .await
             .map_err(|_e| FetchError::Auth)?;
