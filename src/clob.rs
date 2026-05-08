@@ -24,7 +24,13 @@ pub trait BalanceFetcher: Send + Sync {
 // µUSDC scaling needed. fetch() uses it directly.
 
 use chrono::Utc;
+use rust_decimal::Decimal;
 use std::str::FromStr;
+
+/// USDC.e on Polygon has 6 decimals. Polymarket's CLOB returns balance as a raw
+/// on-chain integer (µUSDC) wrapped in a Decimal — e.g. 173_698_381 for $173.698381.
+/// Divide by 10^6 to render as plain USDC.
+const USDC_SCALE: i64 = 1_000_000;
 
 // alloy 1.x uses LocalSigner (same as alloy 0.x "LocalSigner") — PrivateKeySigner
 // is an alias in some alloy versions, but the SDK examples use LocalSigner explicitly.
@@ -79,9 +85,27 @@ impl BalanceFetcher for ClobBalanceFetcher {
             .map_err(|e| FetchError::Network(e.to_string()))?;
 
         Ok(Balance {
-            usdc: resp.balance,
+            usdc: resp.balance / Decimal::from(USDC_SCALE),
             fetched_at: Utc::now(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scale_constant_matches_usdc_decimals() {
+        // USDC.e on Polygon uses 6 decimals.
+        assert_eq!(USDC_SCALE, 1_000_000);
+    }
+
+    #[test]
+    fn micros_to_usdc_via_decimal_division() {
+        let raw = Decimal::from(173_698_381_i64);
+        let usdc = raw / Decimal::from(USDC_SCALE);
+        assert_eq!(usdc, Decimal::from_str("173.698381").unwrap());
     }
 }
 
