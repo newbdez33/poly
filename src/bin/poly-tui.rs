@@ -9,6 +9,8 @@ use poly_tui::{
     config::Config,
     domain::{AppEvent, RefreshStatus},
     input, refresher::{self, Cmd},
+    trader::adapters::redis_stream_wrapper::RedisTraderStream,
+    tui::events::TraderEventStream,
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::{io, sync::Arc, time::Duration};
@@ -46,6 +48,15 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(AlwaysFails)
         }
     };
+
+    let trader_stream: Option<Arc<dyn TraderEventStream>> =
+        match RedisTraderStream::connect(&cfg.redis_url).await {
+            Ok(s) => Some(Arc::new(s)),
+            Err(e) => {
+                tracing::warn!("trader stream subscribe failed: {e} — TUI shows 'not started'");
+                None
+            }
+        };
 
     // Channels
     let (status_tx, mut status_rx) = mpsc::channel::<RefreshStatus>(64);
@@ -86,6 +97,35 @@ async fn main() -> anyhow::Result<()> {
     // Spawn input
     let h_input = tokio::spawn(input::run(event_tx.clone(), shutdown.clone()));
 
+    // Spawn trader event forwarder
+    let event_tx_trader = event_tx.clone();
+    let shutdown_trader = shutdown.clone();
+    let h_trader = if let Some(stream) = trader_stream {
+        tokio::spawn(async move {
+            let tail = match stream.tail(64).await {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!("tail() failed: {e}");
+                    return;
+                }
+            };
+            for ev in tail.history {
+                if event_tx_trader.send(AppEvent::TraderEvent(ev)).await.is_err() { return; }
+            }
+            let mut live = tail.live;
+            loop {
+                tokio::select! {
+                    _ = shutdown_trader.cancelled() => break,
+                    Some(ev) = futures::StreamExt::next(&mut live) => {
+                        if event_tx_trader.send(AppEvent::TraderEvent(ev)).await.is_err() { break; }
+                    }
+                }
+            }
+        })
+    } else {
+        tokio::spawn(async move {})
+    };
+
     // Set up terminal
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
@@ -110,7 +150,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Cleanup
     shutdown.cancel();
-    let _ = tokio::join!(h_refresh, h_input, h_status);
+    let _ = tokio::join!(h_refresh, h_input, h_status, h_trader);
 
     app_result
 }
