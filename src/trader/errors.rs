@@ -57,3 +57,24 @@ pub enum ResolveError {
     #[error("market discovery failed during polling: {0}")]
     Market(#[from] MarketError),
 }
+
+#[derive(Error, Debug, Clone)]
+pub enum PriceError {
+    #[error("gamma price fetch failed: {0}")]
+    Network(String),
+    #[error("price response decode failed: {0}")]
+    Decode(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn price_error_displays() {
+        let e = PriceError::Network("502".into());
+        assert_eq!(format!("{e}"), "gamma price fetch failed: 502");
+        let d = PriceError::Decode("missing field".into());
+        assert_eq!(format!("{d}"), "price response decode failed: missing field");
+    }
+}
