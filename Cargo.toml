@@ -29,6 +29,10 @@ serde_json = "1"
 dotenvy = "0.15"
 envy = "0.4"
 
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+clap = { version = "4", features = ["derive"] }
+
 anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
@@ -45,6 +49,7 @@ testcontainers-modules = { version = "0.11", features = ["redis"] }
 tokio-test = "0.4"
 serde_json = "1"
 tempfile = "3"
+proptest = "1"
 
 [[bin]]
 name = "poly-tui"
@@ -65,3 +70,19 @@ path = "tests/e2e_tui.rs"
 [[test]]
 name = "cache_integration"
 path = "tests/cache_integration.rs"
+
+[[bin]]
+name = "poly-trader"
+path = "src/bin/poly-trader.rs"
+
+# [[test]]
+# name = "trader_state_integration"
+# path = "tests/trader_state_integration.rs"
+#
+# [[test]]
+# name = "trader_market_integration"
+# path = "tests/trader_market_integration.rs"
+#
+# [[test]]
+# name = "e2e_trader"
+# path = "tests/e2e_trader.rs"
