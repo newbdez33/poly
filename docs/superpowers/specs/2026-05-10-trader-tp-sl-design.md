@@ -88,7 +88,7 @@ pub trait MidwindowPriceFetcher: Send + Sync {
 pub struct GammaPriceFetcher { /* reuses GammaMarketDiscovery's reqwest client + cache-bust nonce */ }
 ```
 
-The gamma fetcher reads `last_price` from the per-token gamma response (already in `WindowMarket`'s upstream call — exposed but not stored today). For dry-run + tests, a stub impl with a scripted price series.
+The gamma fetcher reads the per-token entry of `outcomePrices` from the gamma `/markets?clob_token_ids=…` response. `outcomePrices` is gamma's conventional current-bid per outcome (already in `WindowMarket`'s upstream call — exposed but not stored today). For dry-run + tests, a stub impl with a scripted price series.
 
 ### `src/trader/exit_watcher.rs` *(new)*
 
@@ -258,7 +258,7 @@ Existing E2E tests for hold mode still pass (no flag = no behavior change).
 ## Risk caps & operator notes
 
 - `--max-step 5` Martingale cap unchanged. Strategy 4's higher cap-reset frequency (179–303 over 8.5K windows in backtest, vs 42–69 for hold) is absorbed by existing reset semantics.
-- Operator should run dry-run for ≥24 hours and verify event log shows roughly 25–35% TP triggers, 50–65% SL triggers, 5–15% deadline fall-throughs (matches backtest distributions). If trigger rates are far off, suspect gamma `last_price` lag or strike-mismatched window boundaries.
+- Operator should run dry-run for ≥24 hours and verify event log shows roughly 25–35% TP triggers, 50–65% SL triggers, 5–15% deadline fall-throughs (matches backtest distributions). If trigger rates are far off, suspect gamma `outcomePrices` lag or strike-mismatched window boundaries.
 - README v1.5 section will document: example commands, expected event sequence, how to inspect TP/SL trigger rates from the Redis stream, and how to fall back to v1.1 hold mode.
 
 ## Migration / rollback
@@ -269,7 +269,7 @@ Existing E2E tests for hold mode still pass (no flag = no behavior change).
 ## Out of scope (explicit YAGNI)
 
 - All four `ExitRule` variants from the backtest. Only `tp-sl` exposed in trader.
-- CLOB orderbook polling. Gamma `last_price` is sufficient per the polling-cadence decision.
+- CLOB orderbook polling. Gamma `outcomePrices` is sufficient per the polling-cadence decision.
 - Hybrid trigger/sell pricing. One source for both.
 - Multi-strategy run (running hold and tp-sl in parallel). One process, one strategy at a time.
 - Position monitoring beyond a single window. Existing single-window FSM stands.
