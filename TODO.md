@@ -62,6 +62,20 @@ src/
 
 ---
 
+## v1.x.1 — BTC Market Watch Strip ✅ COMPLETE
+
+- [x] WindowMarket extended with price_to_beat (additive, backward-compat with v1.x)
+- [x] tui::market_watch task: Chainlink BTC/USD via Polygon RPC + gamma priceToBeat
+- [x] Layout: new 1-row strip between balance and trader sub-title
+- [x] Graceful degradation on RPC / gamma failure
+- [x] 5 new insta snapshots; 19 market_watch tests; 4 chainlink decode tests; 2 market decoder tests; 1 app handler test
+- [x] Independent of trader process — works with or without poly-trader running
+
+**Open items:**
+- Public `polygon-rpc.com` endpoint may return HTTP 401 intermittently. Use a maintained RPC URL via `POLYGON_RPC_URL` for reliable operation. Acceptable degradation: BTC strip shows `--` when RPC fails.
+
+---
+
 ## v1.1 — Daemon / TUI 拆分（方案 2 重构）
 
 **触发条件：** 准备开始写真正的交易循环（下单、撤单、风控）时，必须先做这次拆分。机器人不能依赖 TUI 进程存活。

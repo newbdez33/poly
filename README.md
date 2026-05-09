@@ -186,6 +186,18 @@ tail -f logs/trader-*.log
 - `--band-min/--band-max` (default 0.45/0.55) — only enter when ask is in this range
 - See `docs/superpowers/specs/2026-05-09-poly-trader-martingale-design.md` §7 for full failure handling
 
+### BTC market watch strip
+
+The TUI shows a 1-row strip with the current Polymarket BTC 5-min window's
+price-to-beat, live Chainlink BTC/USD price, signed diff, and countdown to
+window close. Independent of trader; works whether or not poly-trader is
+running.
+
+Configure the Polygon RPC endpoint via `POLYGON_RPC_URL` in `.env` (default:
+`https://polygon-rpc.com`). If the default endpoint is rate-limited (HTTP 401
+"API key disabled" is a known intermittent issue with the public RPC), use a
+maintained provider URL like Alchemy or Infura.
+
 ## License
 
 Private. Not for redistribution.
