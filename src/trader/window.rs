@@ -105,8 +105,29 @@ pub async fn run_window(
         dollars: buy_fill.dollars,
     }).await;
 
-    // Step 4: await resolution
-    let resolution = match deps.resolver.await_resolution(&market).await {
+    // Step 4: branch on exit rule
+    let buy_dollars = buy_fill.dollars;
+    match &cfg.exit {
+        None => {
+            // v1.1 path: hold to resolution, sell winner
+            await_resolution_and_sweep(deps, ladder, &market, &token_id, &buy_fill).await
+        }
+        Some(exit_cfg) => {
+            // v1.5 path: race ExitWatcher vs await_resolution
+            run_with_tp_sl(deps, ladder, &market, &token_id, &buy_fill, exit_cfg, buy_dollars).await
+        }
+    }
+}
+
+/// v1.1 path: existing await_resolution + winner sweep, extracted unchanged.
+async fn await_resolution_and_sweep(
+    deps: &WindowDeps,
+    ladder: &LadderState,
+    market: &WindowMarket,
+    token_id: &str,
+    buy_fill: &FillResult,
+) -> WindowOutcome {
+    let resolution = match deps.resolver.await_resolution(market).await {
         Ok(r) => r,
         Err(ResolveError::Timeout { .. }) => {
             emit_kind(deps, ladder, TraderEventKind::ResolutionTimeout).await;
@@ -131,25 +152,115 @@ pub async fn run_window(
         return WindowOutcome::Lost { spent_usd: buy_fill.dollars };
     }
 
-    // Step 5: sell winning shares
-    let sell_fill = match deps.executor.sell_market(&token_id, buy_fill.shares).await {
+    let sell_fill = match deps.executor.sell_market(token_id, buy_fill.shares).await {
         Ok(f) => f,
         Err(e) => {
-            emit_kind(deps, ladder, TraderEventKind::SellRejected {
-                reason: format!("{e}"),
-            }).await;
-            // Critical: shares stuck. Emit Alert; return Won with proceeds=0
-            // (FSM resets ladder; user must clean up manually).
+            emit_kind(deps, ladder, TraderEventKind::SellRejected { reason: format!("{e}") }).await;
             emit_kind(deps, ladder, TraderEventKind::Alert {
                 message: format!("sell failed; shares stuck for token {token_id}"),
             }).await;
             return WindowOutcome::Won { proceeds_usd: Decimal::ZERO };
         }
     };
-    emit_kind(deps, ladder, TraderEventKind::SellFilled {
+    emit_kind(deps, ladder, TraderEventKind::SellFilled { proceeds_usd: sell_fill.dollars }).await;
+    WindowOutcome::Won { proceeds_usd: sell_fill.dollars }
+}
+
+/// v1.5 path: race ExitWatcher against resolver. Earliest finisher wins.
+async fn run_with_tp_sl(
+    deps: &WindowDeps,
+    ladder: &LadderState,
+    market: &WindowMarket,
+    token_id: &str,
+    buy_fill: &FillResult,
+    exit_cfg: &crate::trader::exit_watcher::ExitConfig,
+    buy_dollars: Decimal,
+) -> WindowOutcome {
+    use crate::trader::exit_watcher::ExitWatcher;
+    let watcher = ExitWatcher::new(deps.price.clone(), exit_cfg.clone());
+    // Window closes 5 min after window_ts; allow a small grace for resolver post-close.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(290);
+
+    let trigger: Option<crate::trader::exit_watcher::ExitTrigger> = tokio::select! {
+        t = watcher.watch(token_id, deadline) => t,
+        r = deps.resolver.await_resolution(market) => {
+            return resolve_after_select(deps, ladder, token_id, buy_fill, r).await;
+        }
+    };
+
+    let trig = match trigger {
+        Some(t) => t,
+        None => {
+            // Watcher hit deadline without crossing tp/sl. Fall through to resolver.
+            return await_resolution_and_sweep(deps, ladder, market, token_id, buy_fill).await;
+        }
+    };
+
+    // TP or SL fired. Sell now and report outcome based on proceeds vs cost.
+    let sell_fill = match deps.executor.sell_market(token_id, buy_fill.shares).await {
+        Ok(f) => f,
+        Err(e) => {
+            emit_kind(deps, ladder, TraderEventKind::SellRejected { reason: format!("{e}") }).await;
+            emit_kind(deps, ladder, TraderEventKind::Alert {
+                message: format!("tp/sl sell failed; shares stuck for token {token_id}"),
+            }).await;
+            return WindowOutcome::Won { proceeds_usd: Decimal::ZERO };
+        }
+    };
+    emit_kind(deps, ladder, TraderEventKind::ExitTriggered {
+        kind: trig.kind,
+        bid: trig.bid,
         proceeds_usd: sell_fill.dollars,
     }).await;
+    emit_kind(deps, ladder, TraderEventKind::SellFilled { proceeds_usd: sell_fill.dollars }).await;
+    if sell_fill.dollars > buy_dollars {
+        WindowOutcome::Won { proceeds_usd: sell_fill.dollars }
+    } else {
+        WindowOutcome::Lost { spent_usd: buy_dollars - sell_fill.dollars }
+    }
+}
 
+/// When resolver wins the select! before any tp/sl trigger.
+async fn resolve_after_select(
+    deps: &WindowDeps,
+    ladder: &LadderState,
+    token_id: &str,
+    buy_fill: &FillResult,
+    r: Result<Resolution, ResolveError>,
+) -> WindowOutcome {
+    let resolution = match r {
+        Ok(r) => r,
+        Err(ResolveError::Timeout { .. }) => {
+            emit_kind(deps, ladder, TraderEventKind::ResolutionTimeout).await;
+            return WindowOutcome::Skipped { reason: SkipReason::ResolutionTimeout };
+        }
+        Err(e) => {
+            emit_kind(deps, ladder, TraderEventKind::Alert {
+                message: format!("resolver error: {e}"),
+            }).await;
+            return WindowOutcome::Skipped { reason: SkipReason::GammaApiUnavailable };
+        }
+    };
+    let our_won = resolution.winner == ladder.direction;
+    emit_kind(deps, ladder, TraderEventKind::Resolved {
+        winner: resolution.winner,
+        our_side: ladder.direction,
+        our_outcome: if our_won { WinLose::Win } else { WinLose::Lose },
+    }).await;
+    if !our_won {
+        return WindowOutcome::Lost { spent_usd: buy_fill.dollars };
+    }
+    let sell_fill = match deps.executor.sell_market(token_id, buy_fill.shares).await {
+        Ok(f) => f,
+        Err(e) => {
+            emit_kind(deps, ladder, TraderEventKind::SellRejected { reason: format!("{e}") }).await;
+            emit_kind(deps, ladder, TraderEventKind::Alert {
+                message: format!("sell failed; shares stuck for token {token_id}"),
+            }).await;
+            return WindowOutcome::Won { proceeds_usd: Decimal::ZERO };
+        }
+    };
+    emit_kind(deps, ladder, TraderEventKind::SellFilled { proceeds_usd: sell_fill.dollars }).await;
     WindowOutcome::Won { proceeds_usd: sell_fill.dollars }
 }
 
@@ -177,6 +288,7 @@ mod tests {
     use crate::trader::executor::FillResult;
     use crate::trader::resolver::Resolution;
     use async_trait::async_trait;
+    use crate::trader::exit_watcher::{ExitConfig, ExitKind};
     use chrono::Utc;
     use rust_decimal::Decimal;
     use std::str::FromStr;
@@ -511,5 +623,141 @@ mod tests {
             "OrderPlaced", "OrderFilled",
             "Resolved", "SellFilled",
         ]);
+    }
+
+    fn open_market_with_token_ids() -> WindowMarket {
+        WindowMarket {
+            window_ts: 1700000300, slug: "btc-updown-5m-1700000300".into(),
+            up_token_id: "tok-up".into(), down_token_id: "tok-down".into(),
+            up_ask: Decimal::from_str("0.50").unwrap(),
+            down_ask: Decimal::from_str("0.50").unwrap(),
+            closed: false, winner: None,
+            price_to_beat: None,
+        }
+    }
+
+    /// Stub resolver that never returns until cancelled.
+    struct NeverResolver;
+    #[async_trait]
+    impl WindowResolver for NeverResolver {
+        async fn await_resolution(&self, _m: &WindowMarket)
+            -> Result<Resolution, ResolveError>
+        {
+            std::future::pending().await
+        }
+    }
+
+    fn scripted_price(prices: Vec<&str>) -> Arc<crate::trader::price::tests::StubPriceFetcher> {
+        let q: Vec<_> = prices.iter()
+            .map(|p| Ok(Decimal::from_str(p).unwrap()))
+            .collect();
+        Arc::new(crate::trader::price::tests::StubPriceFetcher::new(q))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tp_sl_path_tp_triggers_returns_won() {
+        let market = open_market_with_token_ids();
+        let emitter = CapturingEmitter::new();
+        let deps = WindowDeps {
+            market: StubMarket::ok(market),
+            executor: StubExec::buy_then_sell(
+                Ok(FillResult {
+                    fill_price: Decimal::from_str("0.50").unwrap(),
+                    shares: Decimal::from(10),
+                    dollars: Decimal::from(5),
+                }),
+                Ok(FillResult {
+                    fill_price: Decimal::from_str("0.85").unwrap(),
+                    shares: Decimal::from(10),
+                    dollars: Decimal::from_str("8.40").unwrap(),
+                }),
+            ),
+            resolver: Arc::new(NeverResolver),
+            emitter: emitter.clone(),
+            price: scripted_price(vec!["0.55", "0.70", "0.86"]),
+        };
+        let cfg = cfg_with_exit(ExitConfig {
+            tp_price: Decimal::from_str("0.85").unwrap(),
+            sl_price: Decimal::from_str("0.45").unwrap(),
+            poll: std::time::Duration::from_millis(100),
+        });
+        let outcome = run_window(&deps, &cfg, &fresh_ladder(), 1700000300).await;
+        assert!(matches!(outcome,
+            WindowOutcome::Won { ref proceeds_usd } if *proceeds_usd == Decimal::from_str("8.40").unwrap()));
+        let kinds = emitter.kinds();
+        assert!(kinds.iter().any(|k| matches!(k, TraderEventKind::ExitTriggered { kind: ExitKind::Tp, .. })));
+        assert!(kinds.iter().any(|k| matches!(k, TraderEventKind::SellFilled { .. })));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tp_sl_path_sl_triggers_returns_lost() {
+        let market = open_market_with_token_ids();
+        let emitter = CapturingEmitter::new();
+        let deps = WindowDeps {
+            market: StubMarket::ok(market),
+            executor: StubExec::buy_then_sell(
+                Ok(FillResult {
+                    fill_price: Decimal::from_str("0.50").unwrap(),
+                    shares: Decimal::from(10),
+                    dollars: Decimal::from(5),
+                }),
+                Ok(FillResult {
+                    fill_price: Decimal::from_str("0.45").unwrap(),
+                    shares: Decimal::from(10),
+                    dollars: Decimal::from_str("4.40").unwrap(),
+                }),
+            ),
+            resolver: Arc::new(NeverResolver),
+            emitter: emitter.clone(),
+            price: scripted_price(vec!["0.50", "0.45"]),
+        };
+        let cfg = cfg_with_exit(ExitConfig {
+            tp_price: Decimal::from_str("0.85").unwrap(),
+            sl_price: Decimal::from_str("0.45").unwrap(),
+            poll: std::time::Duration::from_millis(100),
+        });
+        let outcome = run_window(&deps, &cfg, &fresh_ladder(), 1700000300).await;
+        assert!(matches!(outcome,
+            WindowOutcome::Lost { ref spent_usd } if *spent_usd == Decimal::from_str("0.60").unwrap()));
+        let kinds = emitter.kinds();
+        assert!(kinds.iter().any(|k| matches!(k, TraderEventKind::ExitTriggered { kind: ExitKind::Sl, .. })));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tp_sl_path_no_trigger_falls_through_to_resolver() {
+        // Price stays at 0.50 forever; deadline reached without trigger.
+        let market = open_market_with_token_ids();
+        let emitter = CapturingEmitter::new();
+        let deps = WindowDeps {
+            market: StubMarket::ok(market),
+            executor: StubExec::buy_then_sell(
+                Ok(FillResult {
+                    fill_price: Decimal::from_str("0.50").unwrap(),
+                    shares: Decimal::from(10),
+                    dollars: Decimal::from(5),
+                }),
+                Ok(FillResult {
+                    fill_price: Decimal::from_str("0.99").unwrap(),
+                    shares: Decimal::from(10),
+                    dollars: Decimal::from_str("9.90").unwrap(),
+                }),
+            ),
+            resolver: StubResolver::won(Direction::Up),
+            emitter: emitter.clone(),
+            price: stub_price("0.50"),
+        };
+        let cfg = cfg_with_exit(ExitConfig {
+            tp_price: Decimal::from_str("0.85").unwrap(),
+            sl_price: Decimal::from_str("0.45").unwrap(),
+            poll: std::time::Duration::from_millis(50),
+        });
+        let outcome = run_window(&deps, &cfg, &fresh_ladder(), 1700000300).await;
+        assert!(matches!(outcome,
+            WindowOutcome::Won { ref proceeds_usd } if *proceeds_usd == Decimal::from_str("9.90").unwrap()));
+        let kinds = emitter.kinds();
+        assert!(!kinds.iter().any(|k| matches!(k, TraderEventKind::ExitTriggered { .. })),
+                "no exit-triggered event when deadline path fires");
+        assert!(kinds.iter().any(|k| matches!(k, TraderEventKind::Resolved { .. })),
+                "resolved event when deadline path fires");
     }
 }
