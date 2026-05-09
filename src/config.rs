@@ -11,12 +11,15 @@ pub struct Config {
     pub clob_host: String,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    #[serde(default = "default_polygon_rpc_url")]
+    pub polygon_rpc_url: String,
 }
 
 fn default_redis_url() -> String { "redis://127.0.0.1:6379".to_string() }
 fn default_refresh_interval() -> u64 { 30 }
 fn default_clob_host() -> String { "https://clob-v2.polymarket.com".to_string() }
 fn default_log_level() -> String { "info".to_string() }
+fn default_polygon_rpc_url() -> String { "https://polygon-rpc.com".to_string() }
 
 impl Config {
     /// Load from process environment (caller is expected to have run `dotenvy::dotenv()` first).
@@ -58,6 +61,7 @@ mod tests {
             assert_eq!(cfg.refresh_interval_secs, 30);
             assert_eq!(cfg.clob_host, "https://clob-v2.polymarket.com");
             assert_eq!(cfg.log_level, "info");
+            assert_eq!(cfg.polygon_rpc_url, "https://polygon-rpc.com");
         });
     }
 
