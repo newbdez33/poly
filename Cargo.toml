@@ -75,10 +75,10 @@ path = "tests/cache_integration.rs"
 name = "poly-trader"
 path = "src/bin/poly-trader.rs"
 
-# [[test]]
-# name = "trader_state_integration"
-# path = "tests/trader_state_integration.rs"
-#
+[[test]]
+name = "trader_state_integration"
+path = "tests/trader_state_integration.rs"
+
 # [[test]]
 # name = "trader_market_integration"
 # path = "tests/trader_market_integration.rs"
