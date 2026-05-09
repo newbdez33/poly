@@ -131,15 +131,21 @@ Your dev environment is also your production environment (the dev Redis holds re
 
 See `TODO.md`. Highlights:
 
-- **v1.0** — TUI starter (this release)
-- **v1.1** — daemon / TUI split. Required before adding any real trading logic so the bot can run without a UI.
-- **v1.2+** — markets, positions, order placement, strategy framework.
+- **v1.0** ✅ — TUI starter (USDC balance display)
+- **v1.1** ✅ — Polymarket BTC 5-min Martingale trader (`poly-trader` binary)
+- **v1.2** ✅ — BTC market watch strip (live Chainlink price + countdown)
+- **v1.3** — daemon / TUI split. Required before any new trading logic (multi-strategy, dynamic config, etc.)
+- **v1.4+** — markets, positions, advanced strategies, observability
 
 ## Documentation
 
 - `docs/superpowers/specs/2026-05-06-poly-tui-balance-starter-design.md` — v1.0 design
-- `docs/superpowers/plans/2026-05-06-poly-tui-balance-starter.md` — implementation plan (14 tasks)
-- `TODO.md` — roadmap and v1.1 refactor plan
+- `docs/superpowers/plans/2026-05-06-poly-tui-balance-starter.md` — v1.0 plan (14 tasks)
+- `docs/superpowers/specs/2026-05-09-poly-trader-martingale-design.md` — v1.1 trader design
+- `docs/superpowers/plans/2026-05-09-poly-trader-martingale.md` — v1.1 plan (23 tasks)
+- `docs/superpowers/specs/2026-05-09-market-watch-strip-design.md` — v1.2 BTC strip design
+- `docs/superpowers/plans/2026-05-09-market-watch-strip.md` — v1.2 plan (12 tasks)
+- `TODO.md` — roadmap and v1.3 daemon split plan
 
 ## Trader
 

@@ -16,16 +16,16 @@
 - [x] BDD 场景（cucumber-rs）：缓存有值时启动即显示
 - [x] E2E：用 `TestBackend` + mock CLOB + testcontainers Redis 跑通整条路径
 - [x] `.env` 已在 `.gitignore`，仓库内只放 `.env.example`
-- [ ] 真实 Polymarket 账户手动 TUI 冒烟测试 — **intentionally deferred**：需要真实私钥（`POLYMARKET_PRIVATE_KEY`），无法在 CI / 无密钥环境中自动化。待 v1.1 testnet 环境就绪后补测。
+- [ ] 真实 Polymarket 账户手动 TUI 冒烟测试 — **intentionally deferred**：需要真实私钥（`POLYMARKET_PRIVATE_KEY`），无法在 CI / 无密钥环境中自动化。后续 testnet 环境就绪后补测。
 
-**Coverage gap (intentional, v1.1 will address):**
+**Coverage gap (intentional):**
 - `src/input.rs` — crossterm event reader; no headless-friendly mocking. Covered by manual smoke + e2e quit-key scenario.
 - `src/cache.rs` — `RedisBalanceCache` real adapter; integration tests run with `--ignored` (testcontainers); not instrumented in the fast coverage pass. Covered by `cache_integration` tests (4 passed with `--ignored`).
 - `src/clob.rs` — `ClobBalanceFetcher::connect/fetch`; rs-clob-client v2 auth flow is impractical to wiremock. Covered by deferred manual smoke against real Polymarket testnet.
 
 Overall line coverage (lib + BDD, excl. `src/bin`): **79.5%** — just below 80% threshold due to the three files above. Excluding those three intentionally-untestable files: **90.6%**.
 
-### 模块结构（为 v1.1 拆 crate 做准备）
+### 模块结构（为 v1.3 拆 crate 做准备）
 ```
 src/
 ├── main.rs           ← 进程入口，启动三任务
@@ -38,11 +38,11 @@ src/
 └── ui.rs             ← ratatui 渲染
 ```
 
-**关键纪律：** 模块间只通过 trait 通信。这样 v1.1 把文件升级成 crate 时是"剪切粘贴 + 改 import"，不用重构。
+**关键纪律：** 模块间只通过 trait 通信。这样 v1.3 把文件升级成 crate 时是"剪切粘贴 + 改 import"，不用重构。
 
 ---
 
-## v1.x — Trader (Martingale 5min BTC)  ✅ COMPLETE
+## v1.1 — Trader (Martingale 5min BTC)  ✅ COMPLETE
 
 - [x] Pure Martingale FSM in trader::ladder
 - [x] poly-trader binary with CLI + lock + restore
@@ -58,13 +58,13 @@ src/
 - ClobOrderExecutor's `making_amount`/`taking_amount` field interpretation needs live confirmation against AMOY testnet.
 
 **Coverage note (95-99% range — accepted):**
-- `src/trader/` aggregate line coverage: **96.0%** (1057/1101 lines). The ~4% gap is in `market.rs` (11 uncovered function variants — mainly exhaustive enum arms on closed-market decoding), `resolver.rs` (timeout/error paths requiring real time travel), and `scheduler.rs` (5 functions covering async tokio select branches). All gaps are in tested-by-integration-contract paths. 99% target deferred to v2.
+- `src/trader/` aggregate line coverage: **96.0%** (1057/1101 lines). The ~4% gap is in `market.rs` (11 uncovered function variants — mainly exhaustive enum arms on closed-market decoding), `resolver.rs` (timeout/error paths requiring real time travel), and `scheduler.rs` (5 functions covering async tokio select branches). All gaps are in tested-by-integration-contract paths. 99% target deferred to a future release.
 
 ---
 
-## v1.x.1 — BTC Market Watch Strip ✅ COMPLETE
+## v1.2 — BTC Market Watch Strip ✅ COMPLETE
 
-- [x] WindowMarket extended with price_to_beat (additive, backward-compat with v1.x)
+- [x] WindowMarket extended with price_to_beat (additive, backward-compat with v1.1)
 - [x] tui::market_watch task: Chainlink BTC/USD via Polygon RPC + gamma priceToBeat
 - [x] Layout: new 1-row strip between balance and trader sub-title
 - [x] Graceful degradation on RPC / gamma failure
@@ -76,9 +76,9 @@ src/
 
 ---
 
-## v1.1 — Daemon / TUI 拆分（方案 2 重构）
+## v1.3 — Daemon / TUI 拆分（方案 2 重构）
 
-**触发条件：** 准备开始写真正的交易循环（下单、撤单、风控）时，必须先做这次拆分。机器人不能依赖 TUI 进程存活。
+**触发条件：** 准备扩展交易逻辑（多策略、热加载配置、动态切方向）时，必须先做这次拆分。当前 v1.1 trader 单方向 + dry-run 够用，但任何更复杂的形态都要先把 daemon 做出来。
 
 **目标：** 把单二进制拆成两个独立进程
 
@@ -118,7 +118,7 @@ src/
 
 ---
 
-## v1.2+ — 后续路线图（占位，触发时再细化）
+## v1.4+ — 后续路线图（占位，触发时再细化）
 
 - **市场列表 / 订单簿**：rs-clob-client 真正发挥作用的地方
 - **持仓与盈亏**
