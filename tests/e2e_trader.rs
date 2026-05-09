@@ -148,3 +148,47 @@ async fn e2e_tui_subscribes_to_stream() {
     let tail = stream.tail(10).await.unwrap();
     assert!(!tail.history.is_empty());
 }
+
+#[tokio::test]
+#[ignore]
+async fn e2e_exit_triggered_event_reaches_stream() {
+    // Build a TraderEvent with TraderEventKind::ExitTriggered, push it through
+    // RedisTraderStream, then read it back via tail() and verify it round-trips
+    // with kind/bid/proceeds intact. Validates the new variant is wire-compatible
+    // with the existing event log.
+    use poly_tui::trader::exit_watcher::ExitKind;
+
+    let (_node, url) = start_redis().await;
+    let emitter = RedisTraderStream::connect(&url).await.unwrap();
+    let stream = RedisTraderStream::connect(&url).await.unwrap();
+
+    let ladder = LadderState::new(Direction::Up, Decimal::from(5), 5, Utc::now());
+    let session_id = ladder.session_id;
+    let event = poly_tui::trader::event::TraderEvent {
+        ts: Utc::now(),
+        session_id,
+        kind: TraderEventKind::ExitTriggered {
+            kind: ExitKind::Tp,
+            bid: Decimal::from_str("0.86").unwrap(),
+            proceeds_usd: Decimal::from_str("8.40").unwrap(),
+        },
+        ladder,
+    };
+    emitter.emit(&event).await.unwrap();
+
+    let tail = stream.tail(10).await.unwrap();
+    let recv_event = tail
+        .history
+        .iter()
+        .find(|e| matches!(e.kind, TraderEventKind::ExitTriggered { .. }))
+        .expect("ExitTriggered event should appear in tail");
+
+    match &recv_event.kind {
+        TraderEventKind::ExitTriggered { kind, bid, proceeds_usd } => {
+            assert_eq!(*kind, ExitKind::Tp);
+            assert_eq!(*bid, Decimal::from_str("0.86").unwrap());
+            assert_eq!(*proceeds_usd, Decimal::from_str("8.40").unwrap());
+        }
+        other => panic!("unexpected event kind: {other:?}"),
+    }
+}
