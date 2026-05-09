@@ -1,14 +1,25 @@
 use crate::cache::BalanceCache;
 use crate::domain::{AppEvent, Balance, HealthLed, RefreshStatus};
 use crate::refresher::Cmd;
+use crate::trader::event::TraderEvent;
 use crate::ui::{self, UiState};
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::Backend};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TraderHealth {
+    NotStarted,
+    Healthy,
+    Lagging,
+    Stale,
+    Stopped,
+}
 
 #[derive(Clone, Debug)]
 pub struct AppState {
@@ -17,6 +28,9 @@ pub struct AppState {
     pub redis_ok: bool,
     pub refresh_interval: Duration,
     pub should_quit: bool,
+    pub trader_log: VecDeque<TraderEvent>,
+    pub trader_latest: Option<TraderEvent>,
+    pub trader_health: TraderHealth,
 }
 
 impl AppState {
@@ -27,6 +41,9 @@ impl AppState {
             redis_ok: false,
             refresh_interval,
             should_quit: false,
+            trader_log: VecDeque::with_capacity(64),
+            trader_latest: None,
+            trader_health: TraderHealth::NotStarted,
         }
     }
 
@@ -55,6 +72,13 @@ pub fn handle_event(state: &mut AppState, ev: AppEvent, cmd_tx: &mpsc::Sender<Cm
             (KeyCode::Char('r'), _) => { let _ = cmd_tx.try_send(Cmd::ForceRefresh); }
             _ => {}
         },
+        AppEvent::TraderEvent(ev) => {
+            if state.trader_log.len() >= 64 {
+                state.trader_log.pop_front();
+            }
+            state.trader_log.push_back(ev.clone());
+            state.trader_latest = Some(ev);
+        }
     }
 }
 
@@ -67,6 +91,21 @@ pub async fn tick_once(state: &mut AppState, cache: &dyn BalanceCache) {
         state.balance = Some(b);
     }
     // Ok(None) and Err(_) both leave the last known balance untouched.
+
+    state.trader_health = compute_trader_health(&state.trader_latest, chrono::Utc::now());
+}
+
+pub fn compute_trader_health(latest: &Option<TraderEvent>, now: chrono::DateTime<chrono::Utc>) -> TraderHealth {
+    use crate::trader::event::TraderEventKind;
+    let Some(ev) = latest else { return TraderHealth::NotStarted; };
+
+    if matches!(ev.kind, TraderEventKind::SessionStopped { .. }) {
+        return TraderHealth::Stopped;
+    }
+    let age = now.signed_duration_since(ev.ts).num_seconds().max(0) as u64;
+    if age < 6 * 60 { TraderHealth::Healthy }
+    else if age < 12 * 60 { TraderHealth::Lagging }
+    else { TraderHealth::Stale }
 }
 
 pub async fn run<B: Backend>(
@@ -202,5 +241,120 @@ mod tests {
         *cache.fail.lock().unwrap() = true;
         tick_once(&mut s, cache.as_ref()).await;
         assert!(!s.redis_ok, "ping fail should be red");
+    }
+
+    #[tokio::test]
+    async fn trader_event_appended_to_log() {
+        use crate::trader::event::{TraderEvent, TraderEventKind};
+        use crate::trader::ladder::{Direction, LadderState};
+        use rust_decimal::Decimal;
+        use uuid::Uuid;
+
+        let mut s = AppState::new(Duration::from_secs(30));
+        let (tx, _rx) = mpsc::channel(1);
+        let ev = TraderEvent {
+            ts: Utc::now(),
+            session_id: Uuid::nil(),
+            kind: TraderEventKind::SessionStarted,
+            ladder: LadderState::new(Direction::Up, Decimal::from(5), 5, Utc::now()),
+        };
+        handle_event(&mut s, AppEvent::TraderEvent(ev.clone()), &tx);
+        assert_eq!(s.trader_log.len(), 1);
+        assert_eq!(s.trader_latest.as_ref().unwrap().session_id, ev.session_id);
+    }
+
+    #[tokio::test]
+    async fn trader_log_caps_at_64() {
+        use crate::trader::event::{TraderEvent, TraderEventKind};
+        use crate::trader::ladder::{Direction, LadderState};
+        use rust_decimal::Decimal;
+        use uuid::Uuid;
+
+        let mut s = AppState::new(Duration::from_secs(30));
+        let (tx, _rx) = mpsc::channel(1);
+        for _ in 0..70 {
+            let ev = TraderEvent {
+                ts: Utc::now(), session_id: Uuid::nil(),
+                kind: TraderEventKind::SessionStarted,
+                ladder: LadderState::new(Direction::Up, Decimal::from(5), 5, Utc::now()),
+            };
+            handle_event(&mut s, AppEvent::TraderEvent(ev), &tx);
+        }
+        assert_eq!(s.trader_log.len(), 64);
+    }
+
+    #[test]
+    fn trader_health_not_started_when_no_events() {
+        use chrono::TimeZone;
+        let now = Utc.timestamp_opt(1700000000, 0).unwrap();
+        assert_eq!(compute_trader_health(&None, now), TraderHealth::NotStarted);
+    }
+
+    #[test]
+    fn trader_health_healthy_under_6_min() {
+        use crate::trader::event::{TraderEvent, TraderEventKind};
+        use crate::trader::ladder::{Direction, LadderState};
+        use chrono::{Duration as Cd, TimeZone};
+        use rust_decimal::Decimal;
+        use uuid::Uuid;
+
+        let now = Utc.timestamp_opt(1700001000, 0).unwrap();
+        let ev = TraderEvent {
+            ts: now - Cd::seconds(120), session_id: Uuid::nil(),
+            kind: TraderEventKind::SessionStarted,
+            ladder: LadderState::new(Direction::Up, Decimal::from(5), 5, now),
+        };
+        assert_eq!(compute_trader_health(&Some(ev), now), TraderHealth::Healthy);
+    }
+
+    #[test]
+    fn trader_health_lagging_between_6_and_12_min() {
+        use crate::trader::event::{TraderEvent, TraderEventKind};
+        use crate::trader::ladder::{Direction, LadderState};
+        use chrono::{Duration as Cd, TimeZone};
+        use rust_decimal::Decimal;
+        use uuid::Uuid;
+
+        let now = Utc.timestamp_opt(1700001000, 0).unwrap();
+        let ev = TraderEvent {
+            ts: now - Cd::seconds(8 * 60), session_id: Uuid::nil(),
+            kind: TraderEventKind::SessionStarted,
+            ladder: LadderState::new(Direction::Up, Decimal::from(5), 5, now),
+        };
+        assert_eq!(compute_trader_health(&Some(ev), now), TraderHealth::Lagging);
+    }
+
+    #[test]
+    fn trader_health_stale_over_12_min() {
+        use crate::trader::event::{TraderEvent, TraderEventKind};
+        use crate::trader::ladder::{Direction, LadderState};
+        use chrono::{Duration as Cd, TimeZone};
+        use rust_decimal::Decimal;
+        use uuid::Uuid;
+
+        let now = Utc.timestamp_opt(1700001000, 0).unwrap();
+        let ev = TraderEvent {
+            ts: now - Cd::seconds(15 * 60), session_id: Uuid::nil(),
+            kind: TraderEventKind::SessionStarted,
+            ladder: LadderState::new(Direction::Up, Decimal::from(5), 5, now),
+        };
+        assert_eq!(compute_trader_health(&Some(ev), now), TraderHealth::Stale);
+    }
+
+    #[test]
+    fn trader_health_stopped_takes_priority() {
+        use crate::trader::event::{TraderEvent, TraderEventKind};
+        use crate::trader::ladder::{Direction, LadderState, StopReason};
+        use chrono::{Duration as Cd, TimeZone};
+        use rust_decimal::Decimal;
+        use uuid::Uuid;
+
+        let now = Utc.timestamp_opt(1700001000, 0).unwrap();
+        let ev = TraderEvent {
+            ts: now - Cd::seconds(30), session_id: Uuid::nil(),
+            kind: TraderEventKind::SessionStopped { reason: StopReason::CapReached },
+            ladder: LadderState::new(Direction::Up, Decimal::from(5), 5, now),
+        };
+        assert_eq!(compute_trader_health(&Some(ev), now), TraderHealth::Stopped);
     }
 }

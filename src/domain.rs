@@ -5,6 +5,8 @@ use std::str::FromStr;
 use std::time::Duration;
 use thiserror::Error;
 
+use crate::trader::event::TraderEvent;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Balance {
     pub usdc: Decimal,
@@ -52,6 +54,7 @@ pub enum AppEvent {
     Key(crossterm::event::KeyEvent),
     Refresh(RefreshStatus),
     Shutdown,
+    TraderEvent(TraderEvent),
 }
 
 #[derive(Error, Debug)]
