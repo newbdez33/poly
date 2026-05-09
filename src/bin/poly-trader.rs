@@ -49,8 +49,11 @@ async fn main() -> Result<()> {
             .context("connecting Redis stream")?);
     let market: Arc<dyn MarketDiscovery> =
         Arc::new(GammaMarketDiscovery::new(gamma_host));
+    // 360s = 5min window + 60s post-close grace for Polymarket to mark closed=true.
+    // Resolver polls from buy time, so the timeout must cover the full window
+    // duration plus settlement delay.
     let resolver: Arc<dyn WindowResolver> =
-        Arc::new(PolymarketResolver::new(market.clone(), Duration::from_secs(60)));
+        Arc::new(PolymarketResolver::new(market.clone(), Duration::from_secs(360)));
 
     let executor: Arc<dyn OrderExecutor> = if args.dry_run {
         Arc::new(SimulatedExecutor::default())
