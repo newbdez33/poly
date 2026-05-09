@@ -112,6 +112,9 @@ fn format_event_kind(kind: &crate::trader::event::TraderEventKind) -> String {
             our_outcome,
         } => format!("Resolved winner={winner:?} side={our_side:?} we={our_outcome:?}"),
         ResolutionTimeout => "ResolutionTimeout".into(),
+        ExitTriggered { kind, bid, proceeds_usd } => {
+            format!("ExitTriggered {kind:?} bid={bid} proceeds=${proceeds_usd}")
+        }
         SellFilled { proceeds_usd } => format!("SellFilled ${proceeds_usd}"),
         SellRejected { reason } => format!("SellRejected {reason}"),
         LadderUpdated {

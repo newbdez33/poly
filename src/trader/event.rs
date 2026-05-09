@@ -1,4 +1,5 @@
 use crate::trader::errors::EmitError;
+use crate::trader::exit_watcher::ExitKind;
 use crate::trader::ladder::{Direction, LadderState, StopReason, WindowOutcome};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -30,6 +31,11 @@ pub enum TraderEventKind {
     OrderRejected { reason: String },
     Resolved { winner: Direction, our_side: Direction, our_outcome: WinLose },
     ResolutionTimeout,
+    ExitTriggered {
+        kind: ExitKind,
+        bid: Decimal,
+        proceeds_usd: Decimal,
+    },
     SellFilled { proceeds_usd: Decimal },
     SellRejected { reason: String },
     LadderUpdated { from_step: u8, to_step: u8, outcome: WindowOutcome },
@@ -134,5 +140,35 @@ mod tests {
         let e = fake_event(TraderEventKind::Alert { message: "stuck shares".into() });
         let back: TraderEvent = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
         assert_eq!(e, back);
+    }
+
+    #[test]
+    fn exit_triggered_roundtrip() {
+        use crate::trader::exit_watcher::ExitKind;
+        let e = fake_event(TraderEventKind::ExitTriggered {
+            kind: ExitKind::Tp,
+            bid: Decimal::from_str("0.86").unwrap(),
+            proceeds_usd: Decimal::from_str("8.40").unwrap(),
+        });
+        let back: TraderEvent =
+            serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(e, back);
+    }
+
+    #[test]
+    fn exit_triggered_tp_and_sl_serialize_distinctly() {
+        use crate::trader::exit_watcher::ExitKind;
+        let tp = TraderEventKind::ExitTriggered {
+            kind: ExitKind::Tp,
+            bid: Decimal::from_str("0.85").unwrap(),
+            proceeds_usd: Decimal::from_str("8.40").unwrap(),
+        };
+        let sl = TraderEventKind::ExitTriggered {
+            kind: ExitKind::Sl,
+            bid: Decimal::from_str("0.45").unwrap(),
+            proceeds_usd: Decimal::from_str("4.50").unwrap(),
+        };
+        assert_ne!(serde_json::to_string(&tp).unwrap(),
+                   serde_json::to_string(&sl).unwrap());
     }
 }
