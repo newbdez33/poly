@@ -137,25 +137,24 @@ match cfg.exit {
     }
     Some(exit_cfg) => {
         let watcher = ExitWatcher::new(deps.price.clone(), exit_cfg, deadline);
-        tokio::select! {
-            trigger = watcher.watch(&token_id) => {
-                if let Some(t) = trigger {
-                    // sell at market, emit ExitTriggered, compute outcome
-                    let sell_fill = deps.executor.sell_market(&token_id, buy_fill.shares).await?;
-                    let proceeds = sell_fill.dollars;
-                    emit ExitTriggered { kind, bid, proceeds };
-                    return if proceeds > buy_fill.dollars {
-                        WindowOutcome::Won { proceeds_usd: proceeds }
-                    } else {
-                        WindowOutcome::Lost { spent_usd: buy_fill.dollars - proceeds }
-                    };
-                }
-                // None → fall through to resolver below
-            }
-            resolution = deps.resolver.await_resolution(&market) => {
-                // v1.1 winner-sweep path
-            }
+        let trigger = tokio::select! {
+            t = watcher.watch(&token_id) => t,                // Some(trigger) | None on deadline
+            r = deps.resolver.await_resolution(&market)       // resolver beat watcher
+                => return winner_sweep(r, &deps, &buy_fill, &token_id).await,
+        };
+        if let Some(t) = trigger {
+            // TP or SL fired
+            emit ExitTriggered { kind, bid, proceeds_pending: None };
+            let sell_fill = deps.executor.sell_market(&token_id, buy_fill.shares).await?;
+            return if sell_fill.dollars > buy_fill.dollars {
+                WindowOutcome::Won { proceeds_usd: sell_fill.dollars }
+            } else {
+                WindowOutcome::Lost { spent_usd: buy_fill.dollars - sell_fill.dollars }
+            };
         }
+        // Watcher hit deadline without trigger — wait for resolution and sweep
+        let resolution = deps.resolver.await_resolution(&market).await?;
+        return winner_sweep(resolution, &deps, &buy_fill, &token_id).await;
     }
 }
 ```
