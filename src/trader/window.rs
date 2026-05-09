@@ -106,7 +106,6 @@ pub async fn run_window(
     }).await;
 
     // Step 4: branch on exit rule
-    let buy_dollars = buy_fill.dollars;
     match &cfg.exit {
         None => {
             // v1.1 path: hold to resolution, sell winner
@@ -115,7 +114,7 @@ pub async fn run_window(
         Some(exit_cfg) => {
             // v1.5 path: race ExitWatcher vs await_resolution
             run_with_tp_sl(
-                deps, ladder, &market, &token_id, &buy_fill, exit_cfg, buy_dollars, window_ts,
+                deps, ladder, &market, &token_id, &buy_fill, exit_cfg, window_ts,
             ).await
         }
     }
@@ -190,7 +189,6 @@ async fn run_with_tp_sl(
     token_id: &str,
     buy_fill: &FillResult,
     exit_cfg: &crate::trader::exit_watcher::ExitConfig,
-    buy_dollars: Decimal,
     window_ts: i64,
 ) -> WindowOutcome {
     use crate::trader::exit_watcher::ExitWatcher;
@@ -237,10 +235,10 @@ async fn run_with_tp_sl(
         }
     };
     emit_kind(deps, ladder, TraderEventKind::SellFilled { proceeds_usd: sell_fill.dollars }).await;
-    if sell_fill.dollars > buy_dollars {
+    if sell_fill.dollars > buy_fill.dollars {
         WindowOutcome::Won { proceeds_usd: sell_fill.dollars }
     } else {
-        WindowOutcome::Lost { spent_usd: buy_dollars - sell_fill.dollars }
+        WindowOutcome::Lost { spent_usd: buy_fill.dollars - sell_fill.dollars }
     }
 }
 
