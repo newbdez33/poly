@@ -160,7 +160,7 @@ fn trader_health_to_led(h: TraderHealth) -> HealthLed {
 }
 
 fn render_market_strip(frame: &mut Frame, area: Rect, state: &UiState) {
-    use rust_decimal::Decimal;
+    use rust_decimal::prelude::ToPrimitive;
 
     let m = match &state.market {
         Some(m) => m,
@@ -170,36 +170,54 @@ fn render_market_strip(frame: &mut Frame, area: Rect, state: &UiState) {
         }
     };
 
+    // Health-driven dimming: if a value is older than its threshold, render
+    // it in DarkGray so the user knows the number isn't fresh.
+    let to_beat_style = if m.gamma_healthy(state.now) {
+        Style::default()
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let current_style = if m.rpc_healthy(state.now) {
+        Style::default()
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
     let mut spans: Vec<Span> = Vec::new();
     spans.push(Span::raw(" BTC "));
 
     match (m.price_to_beat, m.current_price) {
         (Some(p), Some(c)) => {
-            spans.push(Span::raw(format_usd_int(p)));
+            spans.push(Span::styled(format_usd_int(p), to_beat_style));
             spans.push(Span::raw(" \u{2192} "));
-            spans.push(Span::raw(format_usd_int(c)));
-            let diff = c - p;
-            let (sign, color) = if diff > Decimal::ZERO {
+            spans.push(Span::styled(format_usd_int(c), current_style));
+            // Decide diff sign + color from the rounded integer, not the raw
+            // Decimal. Otherwise a -$0.30 diff rounds to "0" but is still
+            // classified as negative — user sees a red "0" with no minus sign,
+            // which looks like a bug.
+            let raw_diff = c - p;
+            let diff_int: i64 = raw_diff.round().to_i64().unwrap_or(0);
+            let (sign, color) = if diff_int > 0 {
                 ("+", Color::Green)
-            } else if diff < Decimal::ZERO {
+            } else if diff_int < 0 {
                 ("", Color::Red)
             } else {
                 ("\u{00b1}", Color::White)
             };
             spans.push(Span::raw("  "));
             spans.push(Span::styled(
-                format!("{sign}{}", format_usd_int(diff)),
+                format!("{sign}{}", format_usd_int(raw_diff)),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ));
         }
         (None, Some(c)) => {
             spans.push(Span::raw("--"));
             spans.push(Span::raw(" \u{2192} "));
-            spans.push(Span::raw(format_usd_int(c)));
+            spans.push(Span::styled(format_usd_int(c), current_style));
             spans.push(Span::raw("  --"));
         }
         (Some(p), None) => {
-            spans.push(Span::raw(format_usd_int(p)));
+            spans.push(Span::styled(format_usd_int(p), to_beat_style));
             spans.push(Span::raw(" \u{2192} "));
             spans.push(Span::styled(
                 "--",
@@ -406,6 +424,39 @@ mod tests {
         let boundary = fixed_now().timestamp() / 300 * 300;
         s.now = chrono::Utc.timestamp_opt(boundary, 0).unwrap();
         insta::assert_snapshot!("market_rolling", render_to_buffer(&s));
+    }
+
+    #[test]
+    fn renders_market_diff_rounds_to_zero() {
+        // Raw diff = -0.30 → rounds to 0 → expect white "±0", NOT red "0".
+        let mut m = MarketState::empty();
+        m.window_ts = Some(fixed_now().timestamp() / 300 * 300);
+        m.price_to_beat = Some(Decimal::from_str("80425.30").unwrap());
+        m.current_price = Some(Decimal::from_str("80425.00").unwrap());
+        let state = ui_state_with_market(Some(m));
+        insta::assert_snapshot!("market_diff_rounds_to_zero", render_to_buffer(&state));
+    }
+
+    #[test]
+    fn renders_market_rpc_stale() {
+        // last_rpc_ok_at = 60s before fixed_now → rpc_unhealthy → current price
+        // renders DarkGray. last_gamma_ok_at fresh → price-to-beat normal.
+        let mut m = make_market(Some("80425"), Some("80431"));
+        m.last_rpc_ok_at = Some(fixed_now() - chrono::Duration::seconds(60));
+        m.last_gamma_ok_at = Some(fixed_now() - chrono::Duration::seconds(30));
+        let state = ui_state_with_market(Some(m));
+        insta::assert_snapshot!("market_rpc_stale", render_to_buffer(&state));
+    }
+
+    #[test]
+    fn renders_market_gamma_stale() {
+        // last_gamma_ok_at = 10min before fixed_now → gamma_unhealthy → price-
+        // to-beat renders DarkGray. RPC fresh → current price normal.
+        let mut m = make_market(Some("80425"), Some("80431"));
+        m.last_rpc_ok_at = Some(fixed_now() - chrono::Duration::seconds(5));
+        m.last_gamma_ok_at = Some(fixed_now() - chrono::Duration::seconds(10 * 60));
+        let state = ui_state_with_market(Some(m));
+        insta::assert_snapshot!("market_gamma_stale", render_to_buffer(&state));
     }
 
     #[test]
