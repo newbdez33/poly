@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
         Arc::new(RedisTraderStream::connect(&cfg.redis_url).await
             .context("connecting Redis stream")?);
     let market: Arc<dyn MarketDiscovery> =
-        Arc::new(GammaMarketDiscovery::new(gamma_host));
+        Arc::new(GammaMarketDiscovery::new(gamma_host.clone()));
     // 600s = 5min window + 5min post-close grace. With gamma-api caching
     // defeated by the wrapper's cache-bust param, closure should be visible
     // within ~30s of actual close, but the wider window absorbs CDN tail.
@@ -105,16 +105,32 @@ async fn main() -> Result<()> {
         shutdown_sig.cancel();
     });
 
+    let price: Arc<dyn poly_tui::trader::price::MidwindowPriceFetcher> = Arc::new(
+        poly_tui::trader::adapters::gamma_price_wrapper::GammaPriceFetcher::new(gamma_host.clone()),
+    );
+
     // WindowExecutor adapter (binds run_window over our deps)
     let window_deps = Arc::new(WindowDeps {
         market: market.clone(),
         executor: executor.clone(),
         resolver: resolver.clone(),
         emitter: emitter.clone(),
+        price: price.clone(),
     });
+    let exit_cfg = match args.exit_rule {
+        poly_tui::trader::config::ExitRuleArg::Hold => None,
+        poly_tui::trader::config::ExitRuleArg::TpSl => Some(
+            poly_tui::trader::exit_watcher::ExitConfig {
+                tp_price: args.tp_price.expect("validated: --tp-price required"),
+                sl_price: args.sl_price.expect("validated: --sl-price required"),
+                poll: std::time::Duration::from_secs(args.poll_secs as u64),
+            }
+        ),
+    };
     let window_cfg = WindowConfig {
         band_min: args.band_min,
         band_max: args.band_max,
+        exit: exit_cfg,
     };
     let window_exec: Arc<dyn WindowExecutor> = Arc::new(BoundWindowExec {
         deps: window_deps.clone(),
