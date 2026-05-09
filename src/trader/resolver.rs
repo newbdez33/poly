@@ -94,6 +94,7 @@ mod tests {
             up_token_id: "u".into(), down_token_id: "d".into(),
             up_ask: Decimal::ONE_HUNDRED, down_ask: Decimal::ONE_HUNDRED,
             closed: false, winner: None,
+            price_to_beat: None,
         }
     }
     fn closed_market(winner: Direction) -> WindowMarket {
@@ -102,6 +103,7 @@ mod tests {
             up_token_id: "u".into(), down_token_id: "d".into(),
             up_ask: Decimal::ONE_HUNDRED, down_ask: Decimal::ONE_HUNDRED,
             closed: true, winner: Some(winner),
+            price_to_beat: None,
         }
     }
 

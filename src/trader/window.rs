@@ -281,6 +281,7 @@ mod tests {
             up_ask: Decimal::from_str(up_ask).unwrap(),
             down_ask: Decimal::from_str(down_ask).unwrap(),
             closed: false, winner: None,
+            price_to_beat: None,
         }
     }
 

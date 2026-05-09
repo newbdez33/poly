@@ -15,6 +15,7 @@ pub struct WindowMarket {
     pub down_ask: Decimal,
     pub closed: bool,
     pub winner: Option<Direction>,
+    pub price_to_beat: Option<Decimal>,
 }
 
 impl WindowMarket {
@@ -109,6 +110,11 @@ pub fn decode_event_response(json: &str, window_ts: i64) -> Result<WindowMarket,
         None
     };
 
+    let price_to_beat = event.get("eventMetadata")
+        .and_then(|m| m.get("priceToBeat"))
+        .and_then(|p| p.as_f64())
+        .and_then(|f| rust_decimal::Decimal::from_str_exact(&f.to_string()).ok());
+
     Ok(WindowMarket {
         window_ts,
         slug,
@@ -118,6 +124,7 @@ pub fn decode_event_response(json: &str, window_ts: i64) -> Result<WindowMarket,
         down_ask,
         closed,
         winner,
+        price_to_beat,
     })
 }
 
@@ -236,10 +243,37 @@ mod tests {
             up_ask: Decimal::from_str("0.51").unwrap(),
             down_ask: Decimal::from_str("0.49").unwrap(),
             closed: false, winner: None,
+            price_to_beat: None,
         };
         assert_eq!(m.ask_for(Direction::Up), Decimal::from_str("0.51").unwrap());
         assert_eq!(m.ask_for(Direction::Down), Decimal::from_str("0.49").unwrap());
         assert_eq!(m.token_id_for(Direction::Up), "u");
         assert_eq!(m.token_id_for(Direction::Down), "d");
+    }
+
+    #[test]
+    fn decode_extracts_price_to_beat() {
+        let json = r#"[{"markets":[{
+            "slug":"x", "closed":false,
+            "outcomes":"[\"Up\",\"Down\"]",
+            "clobTokenIds":"[\"u\",\"d\"]",
+            "outcomePrices":"[\"0.50\",\"0.50\"]"
+        }],
+        "eventMetadata": {"priceToBeat": 80424.78}
+        }]"#;
+        let m = decode_event_response(json, 0).unwrap();
+        assert_eq!(m.price_to_beat, Some(Decimal::from_str("80424.78").unwrap()));
+    }
+
+    #[test]
+    fn decode_missing_event_metadata_yields_none_price_to_beat() {
+        let json = r#"[{"markets":[{
+            "slug":"x", "closed":false,
+            "outcomes":"[\"Up\",\"Down\"]",
+            "clobTokenIds":"[\"u\",\"d\"]",
+            "outcomePrices":"[\"0.50\",\"0.50\"]"
+        }]}]"#;
+        let m = decode_event_response(json, 0).unwrap();
+        assert_eq!(m.price_to_beat, None);
     }
 }
