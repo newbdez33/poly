@@ -2,10 +2,12 @@ use crate::trader::errors::{ExecError, MarketError, ResolveError};
 use crate::trader::event::{
     EntryDecision, OrderKind, TraderEventEmitter, TraderEventKind, WinLose,
 };
-use crate::trader::executor::{compute_share_count, meets_minimum, OrderExecutor};
+use crate::trader::executor::{compute_share_count, meets_minimum, FillResult, OrderExecutor};
+use crate::trader::exit_watcher::ExitConfig;
 use crate::trader::ladder::{Direction, LadderState, SkipReason, WindowOutcome};
 use crate::trader::market::{MarketDiscovery, WindowMarket};
-use crate::trader::resolver::WindowResolver;
+use crate::trader::price::MidwindowPriceFetcher;
+use crate::trader::resolver::{Resolution, WindowResolver};
 use rust_decimal::Decimal;
 use std::sync::Arc;
 
@@ -14,11 +16,13 @@ pub struct WindowDeps {
     pub executor: Arc<dyn OrderExecutor>,
     pub resolver: Arc<dyn WindowResolver>,
     pub emitter: Arc<dyn TraderEventEmitter>,
+    pub price: Arc<dyn MidwindowPriceFetcher>,
 }
 
 pub struct WindowConfig {
     pub band_min: Decimal,
     pub band_max: Decimal,
+    pub exit: Option<ExitConfig>,
 }
 
 /// Execute one 5-min window. Returns the WindowOutcome the FSM consumes.
@@ -285,11 +289,34 @@ mod tests {
         }
     }
 
+    fn stub_price(constant: &str) -> Arc<crate::trader::price::tests::StubPriceFetcher> {
+        let value = Decimal::from_str(constant).unwrap();
+        let mut q = vec![];
+        for _ in 0..1000 { q.push(Ok(value)); }
+        Arc::new(crate::trader::price::tests::StubPriceFetcher::new(q))
+    }
+
     fn cfg() -> WindowConfig {
         WindowConfig {
             band_min: Decimal::from_str("0.45").unwrap(),
             band_max: Decimal::from_str("0.55").unwrap(),
+            exit: None,
         }
+    }
+
+    fn cfg_with_exit(exit: ExitConfig) -> WindowConfig {
+        WindowConfig {
+            band_min: Decimal::from_str("0.45").unwrap(),
+            band_max: Decimal::from_str("0.55").unwrap(),
+            exit: Some(exit),
+        }
+    }
+
+    #[tokio::test]
+    async fn cfg_default_keeps_exit_none() {
+        // Smoke: existing tests build WindowConfig without exit; default is None.
+        let c = cfg();
+        assert!(c.exit.is_none());
     }
 
     #[tokio::test]
@@ -312,6 +339,7 @@ mod tests {
             ),
             resolver: StubResolver::won(Direction::Up),
             emitter: emitter.clone(),
+            price: stub_price("0.50"),
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome,
@@ -331,6 +359,7 @@ mod tests {
             })),
             resolver: StubResolver::won(Direction::Down),
             emitter: CapturingEmitter::new(),
+            price: stub_price("0.50"),
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome,
@@ -345,6 +374,7 @@ mod tests {
             executor: StubExec::buy_only(Err(ExecError::FillOrKillFailed)),
             resolver: StubResolver::timeout(),
             emitter: CapturingEmitter::new(),
+            price: stub_price("0.50"),
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome, WindowOutcome::Skipped { reason: SkipReason::MarketNotFound }));
@@ -357,6 +387,7 @@ mod tests {
             executor: StubExec::buy_only(Err(ExecError::FillOrKillFailed)),
             resolver: StubResolver::timeout(),
             emitter: CapturingEmitter::new(),
+            price: stub_price("0.50"),
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome,
@@ -372,6 +403,7 @@ mod tests {
             executor: StubExec::buy_only(Err(ExecError::FillOrKillFailed)),
             resolver: StubResolver::timeout(),
             emitter: CapturingEmitter::new(),
+            price: stub_price("0.50"),
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome,
@@ -387,6 +419,7 @@ mod tests {
             executor: StubExec::buy_only(Err(ExecError::FillOrKillFailed)),
             resolver: StubResolver::timeout(),
             emitter: CapturingEmitter::new(),
+            price: stub_price("0.50"),
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome,
@@ -406,6 +439,7 @@ mod tests {
             })),
             resolver: StubResolver::timeout(),
             emitter: CapturingEmitter::new(),
+            price: stub_price("0.50"),
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome,
@@ -429,6 +463,7 @@ mod tests {
             ),
             resolver: StubResolver::won(Direction::Up),
             emitter: emitter.clone(),
+            price: stub_price("0.50"),
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome, WindowOutcome::Won { ref proceeds_usd } if *proceeds_usd == Decimal::ZERO));
@@ -458,6 +493,7 @@ mod tests {
             ),
             resolver: StubResolver::won(Direction::Up),
             emitter: emitter.clone(),
+            price: stub_price("0.50"),
         };
         run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         let kinds = emitter.kinds();
