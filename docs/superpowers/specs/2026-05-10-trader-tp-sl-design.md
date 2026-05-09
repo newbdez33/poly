@@ -144,7 +144,7 @@ match cfg.exit {
         };
         if let Some(t) = trigger {
             // TP or SL fired
-            emit ExitTriggered { kind, bid, proceeds_pending: None };
+            emit ExitTriggered { kind, bid };
             let sell_fill = deps.executor.sell_market(&token_id, buy_fill.shares).await?;
             return if sell_fill.dollars > buy_fill.dollars {
                 WindowOutcome::Won { proceeds_usd: sell_fill.dollars }
@@ -169,7 +169,6 @@ pub enum TraderEventKind {
     ExitTriggered {
         kind: ExitKind,        // Tp | Sl
         bid: Decimal,
-        proceeds_usd: Decimal,
     },
 }
 ```

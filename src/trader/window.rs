@@ -196,6 +196,13 @@ async fn run_with_tp_sl(
         }
     };
 
+    // Emit ExitTriggered BEFORE sell so the trace shows trigger reason
+    // regardless of fill success.
+    emit_kind(deps, ladder, TraderEventKind::ExitTriggered {
+        kind: trig.kind,
+        bid: trig.bid,
+    }).await;
+
     // TP or SL fired. Sell now and report outcome based on proceeds vs cost.
     let sell_fill = match deps.executor.sell_market(token_id, buy_fill.shares).await {
         Ok(f) => f,
@@ -207,11 +214,6 @@ async fn run_with_tp_sl(
             return WindowOutcome::Won { proceeds_usd: Decimal::ZERO };
         }
     };
-    emit_kind(deps, ladder, TraderEventKind::ExitTriggered {
-        kind: trig.kind,
-        bid: trig.bid,
-        proceeds_usd: sell_fill.dollars,
-    }).await;
     emit_kind(deps, ladder, TraderEventKind::SellFilled { proceeds_usd: sell_fill.dollars }).await;
     if sell_fill.dollars > buy_dollars {
         WindowOutcome::Won { proceeds_usd: sell_fill.dollars }

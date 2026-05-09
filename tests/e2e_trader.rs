@@ -154,7 +154,7 @@ async fn e2e_tui_subscribes_to_stream() {
 async fn e2e_exit_triggered_event_reaches_stream() {
     // Build a TraderEvent with TraderEventKind::ExitTriggered, push it through
     // RedisTraderStream, then read it back via tail() and verify it round-trips
-    // with kind/bid/proceeds intact. Validates the new variant is wire-compatible
+    // with kind/bid intact. Validates the new variant is wire-compatible
     // with the existing event log.
     use poly_tui::trader::exit_watcher::ExitKind;
 
@@ -170,7 +170,6 @@ async fn e2e_exit_triggered_event_reaches_stream() {
         kind: TraderEventKind::ExitTriggered {
             kind: ExitKind::Tp,
             bid: Decimal::from_str("0.86").unwrap(),
-            proceeds_usd: Decimal::from_str("8.40").unwrap(),
         },
         ladder,
     };
@@ -184,10 +183,9 @@ async fn e2e_exit_triggered_event_reaches_stream() {
         .expect("ExitTriggered event should appear in tail");
 
     match &recv_event.kind {
-        TraderEventKind::ExitTriggered { kind, bid, proceeds_usd } => {
+        TraderEventKind::ExitTriggered { kind, bid } => {
             assert_eq!(*kind, ExitKind::Tp);
             assert_eq!(*bid, Decimal::from_str("0.86").unwrap());
-            assert_eq!(*proceeds_usd, Decimal::from_str("8.40").unwrap());
         }
         other => panic!("unexpected event kind: {other:?}"),
     }
