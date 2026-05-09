@@ -121,7 +121,7 @@ pub async fn run_window(
     }
 }
 
-/// v1.1 path: existing await_resolution + winner sweep, extracted unchanged.
+/// v1.1 path: existing await_resolution + winner sweep.
 async fn await_resolution_and_sweep(
     deps: &WindowDeps,
     ladder: &LadderState,
@@ -129,7 +129,21 @@ async fn await_resolution_and_sweep(
     token_id: &str,
     buy_fill: &FillResult,
 ) -> WindowOutcome {
-    let resolution = match deps.resolver.await_resolution(market).await {
+    let r = deps.resolver.await_resolution(market).await;
+    winner_sweep(deps, ladder, token_id, buy_fill, r).await
+}
+
+/// Shared post-resolution path: handle Timeout/error, on win sell market,
+/// on lose return Lost. Used by both v1.1 await_resolution_and_sweep and
+/// the v1.5 select! resolver branch.
+async fn winner_sweep(
+    deps: &WindowDeps,
+    ladder: &LadderState,
+    token_id: &str,
+    buy_fill: &FillResult,
+    r: Result<Resolution, ResolveError>,
+) -> WindowOutcome {
+    let resolution = match r {
         Ok(r) => r,
         Err(ResolveError::Timeout { .. }) => {
             emit_kind(deps, ladder, TraderEventKind::ResolutionTimeout).await;
@@ -192,7 +206,7 @@ async fn run_with_tp_sl(
     let trigger: Option<crate::trader::exit_watcher::ExitTrigger> = tokio::select! {
         t = watcher.watch(token_id, deadline) => t,
         r = deps.resolver.await_resolution(market) => {
-            return resolve_after_select(deps, ladder, token_id, buy_fill, r).await;
+            return winner_sweep(deps, ladder, token_id, buy_fill, r).await;
         }
     };
 
@@ -228,50 +242,6 @@ async fn run_with_tp_sl(
     } else {
         WindowOutcome::Lost { spent_usd: buy_dollars - sell_fill.dollars }
     }
-}
-
-/// When resolver wins the select! before any tp/sl trigger.
-async fn resolve_after_select(
-    deps: &WindowDeps,
-    ladder: &LadderState,
-    token_id: &str,
-    buy_fill: &FillResult,
-    r: Result<Resolution, ResolveError>,
-) -> WindowOutcome {
-    let resolution = match r {
-        Ok(r) => r,
-        Err(ResolveError::Timeout { .. }) => {
-            emit_kind(deps, ladder, TraderEventKind::ResolutionTimeout).await;
-            return WindowOutcome::Skipped { reason: SkipReason::ResolutionTimeout };
-        }
-        Err(e) => {
-            emit_kind(deps, ladder, TraderEventKind::Alert {
-                message: format!("resolver error: {e}"),
-            }).await;
-            return WindowOutcome::Skipped { reason: SkipReason::GammaApiUnavailable };
-        }
-    };
-    let our_won = resolution.winner == ladder.direction;
-    emit_kind(deps, ladder, TraderEventKind::Resolved {
-        winner: resolution.winner,
-        our_side: ladder.direction,
-        our_outcome: if our_won { WinLose::Win } else { WinLose::Lose },
-    }).await;
-    if !our_won {
-        return WindowOutcome::Lost { spent_usd: buy_fill.dollars };
-    }
-    let sell_fill = match deps.executor.sell_market(token_id, buy_fill.shares).await {
-        Ok(f) => f,
-        Err(e) => {
-            emit_kind(deps, ladder, TraderEventKind::SellRejected { reason: format!("{e}") }).await;
-            emit_kind(deps, ladder, TraderEventKind::Alert {
-                message: format!("sell failed; shares stuck for token {token_id}"),
-            }).await;
-            return WindowOutcome::Won { proceeds_usd: Decimal::ZERO };
-        }
-    };
-    emit_kind(deps, ladder, TraderEventKind::SellFilled { proceeds_usd: sell_fill.dollars }).await;
-    WindowOutcome::Won { proceeds_usd: sell_fill.dollars }
 }
 
 async fn emit_kind(
