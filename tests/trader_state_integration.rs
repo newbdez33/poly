@@ -101,3 +101,61 @@ async fn refresh_lock_fails_when_owner_mismatches() {
         .await;
     assert!(matches!(r, Err(_)));
 }
+
+// ── Stream tests ─────────────────────────────────────────────────────────────
+
+use futures::StreamExt;
+use poly_tui::trader::adapters::redis_stream_wrapper::RedisTraderStream;
+use poly_tui::trader::event::{TraderEvent, TraderEventEmitter, TraderEventKind};
+use poly_tui::tui::events::TraderEventStream;
+use uuid::Uuid;
+
+#[tokio::test]
+#[ignore]
+async fn stream_emit_then_tail_history() {
+    let (_node, url) = start_redis().await;
+    let stream = RedisTraderStream::connect(&url).await.unwrap();
+
+    let s = LadderState::new(Direction::Up, Decimal::from(5), 5, Utc::now());
+    for _ in 0..3 {
+        let ev = TraderEvent {
+            ts: Utc::now(),
+            session_id: Uuid::nil(),
+            kind: TraderEventKind::SessionStarted,
+            ladder: s.clone(),
+        };
+        stream.emit(&ev).await.unwrap();
+    }
+    let tail = stream.tail(10).await.unwrap();
+    assert_eq!(tail.history.len(), 3);
+}
+
+#[tokio::test]
+#[ignore]
+async fn stream_live_receives_new_events() {
+    let (_node, url) = start_redis().await;
+    let stream = RedisTraderStream::connect(&url).await.unwrap();
+
+    let tail = stream.tail(10).await.unwrap();
+    let mut live = tail.live;
+
+    // Emit a fresh event after subscribing.
+    let s = LadderState::new(Direction::Up, Decimal::from(5), 5, Utc::now());
+    let ev = TraderEvent {
+        ts: Utc::now(),
+        session_id: Uuid::nil(),
+        kind: TraderEventKind::SessionStarted,
+        ladder: s,
+    };
+    let stream2 = RedisTraderStream::connect(&url).await.unwrap();
+    stream2.emit(&ev).await.unwrap();
+
+    let received = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        live.next(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(received.kind, TraderEventKind::SessionStarted));
+}
