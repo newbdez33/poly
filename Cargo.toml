@@ -80,10 +80,10 @@ path = "src/bin/poly-trader.rs"
 name = "trader_state_integration"
 path = "tests/trader_state_integration.rs"
 
-# [[test]]
-# name = "trader_market_integration"
-# path = "tests/trader_market_integration.rs"
-#
+[[test]]
+name = "trader_market_integration"
+path = "tests/trader_market_integration.rs"
+
 # [[test]]
 # name = "e2e_trader"
 # path = "tests/e2e_trader.rs"
