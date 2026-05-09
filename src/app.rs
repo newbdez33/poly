@@ -2,6 +2,7 @@ use crate::cache::BalanceCache;
 use crate::domain::{AppEvent, Balance, HealthLed, RefreshStatus};
 use crate::refresher::Cmd;
 use crate::trader::event::TraderEvent;
+use crate::tui::market_watch::MarketState;
 use crate::ui::{self, UiState};
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -31,6 +32,7 @@ pub struct AppState {
     pub trader_log: VecDeque<TraderEvent>,
     pub trader_latest: Option<TraderEvent>,
     pub trader_health: TraderHealth,
+    pub market: Option<MarketState>,
 }
 
 impl AppState {
@@ -44,6 +46,7 @@ impl AppState {
             trader_log: VecDeque::with_capacity(64),
             trader_latest: None,
             trader_health: TraderHealth::NotStarted,
+            market: None,
         }
     }
 
@@ -82,7 +85,9 @@ pub fn handle_event(state: &mut AppState, ev: AppEvent, cmd_tx: &mpsc::Sender<Cm
             state.trader_log.push_back(ev.clone());
             state.trader_latest = Some(ev);
         }
-        AppEvent::MarketUpdate(_) => {}
+        AppEvent::MarketUpdate(s) => {
+            state.market = Some(s);
+        }
     }
 }
 
@@ -360,5 +365,15 @@ mod tests {
             ladder: LadderState::new(Direction::Up, Decimal::from(5), 5, now),
         };
         assert_eq!(compute_trader_health(&Some(ev), now), TraderHealth::Stopped);
+    }
+
+    #[tokio::test]
+    async fn market_update_sets_state() {
+        let mut s = AppState::new(Duration::from_secs(30));
+        let (tx, _rx) = mpsc::channel(1);
+        let mut market = MarketState::empty();
+        market.current_price = Some(Decimal::from(80000));
+        handle_event(&mut s, AppEvent::MarketUpdate(market.clone()), &tx);
+        assert_eq!(s.market.as_ref().unwrap().current_price, market.current_price);
     }
 }
