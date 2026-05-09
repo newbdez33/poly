@@ -85,6 +85,6 @@ path = "tests/trader_state_integration.rs"
 name = "trader_market_integration"
 path = "tests/trader_market_integration.rs"
 
-# [[test]]
-# name = "e2e_trader"
-# path = "tests/e2e_trader.rs"
+[[test]]
+name = "e2e_trader"
+path = "tests/e2e_trader.rs"
