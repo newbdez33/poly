@@ -100,6 +100,6 @@ path = "tests/chainlink_integration.rs"
 name = "poly-backtest"
 path = "src/bin/poly-backtest.rs"
 
-# [[test]]
-# name = "backtest_smoke"
-# path = "tests/backtest_smoke.rs"
+[[test]]
+name = "backtest_smoke"
+path = "tests/backtest_smoke.rs"
