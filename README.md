@@ -141,6 +141,51 @@ See `TODO.md`. Highlights:
 - `docs/superpowers/plans/2026-05-06-poly-tui-balance-starter.md` — implementation plan (14 tasks)
 - `TODO.md` — roadmap and v1.1 refactor plan
 
+## Trader
+
+`poly-trader` is the headless trading process. It runs Martingale on Polymarket's BTC 5-minute up/down market.
+
+### Quick start (dry-run, no real money)
+
+```bash
+docker compose up -d
+poly-trader --direction up --base 5 --dry-run --max-windows 12
+poly-tui    # observe events in another terminal
+```
+
+### Real money
+
+```bash
+poly-trader --direction up --base 5
+```
+
+### Stop / resume
+
+```bash
+# stop
+Ctrl+C  # current window completes, then exit
+
+# resume
+poly-trader --direction up --base 5    # picks up ladder from Redis
+
+# fresh start (DANGER: discards open ladder)
+poly-trader --direction up --base 5 --reset
+```
+
+### Inspect state
+
+```bash
+docker exec poly-redis redis-cli GET poly:prod:trader:ladder | jq .
+docker exec poly-redis redis-cli XREVRANGE poly:prod:trader:events + - COUNT 10
+tail -f logs/trader-*.log
+```
+
+### Risk caps
+
+- `--max-step N` (default 5) — stop session after N consecutive losses
+- `--band-min/--band-max` (default 0.45/0.55) — only enter when ask is in this range
+- See `docs/superpowers/specs/2026-05-09-poly-trader-martingale-design.md` §7 for full failure handling
+
 ## License
 
 Private. Not for redistribution.
