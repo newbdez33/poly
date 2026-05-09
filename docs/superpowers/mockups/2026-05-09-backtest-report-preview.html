@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Polymarket BTC 5min Strategy Backtest — PREVIEW</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg-elev: #161b22;
+  --bg-hover: #1f2937;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-dim: #8b949e;
+  --accent: #58a6ff;
+  --positive: #3fb950;
+  --negative: #f85149;
+  --warning: #d29922;
+
+  --strat1: #58a6ff;
+  --strat2: #f85149;
+  --strat3: #3fb950;
+  --strat4: #a371f7;
+  --strat5: #4ecdc4;
+  --strat6: #8b949e;
+}
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  margin: 0;
+  padding: 24px;
+  line-height: 1.5;
+  font-size: 14px;
+}
+.container { max-width: 1280px; margin: 0 auto; }
+header {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 16px;
+  margin-bottom: 24px;
+}
+h1 { margin: 0 0 8px 0; font-size: 22px; font-weight: 600; }
+h2 {
+  margin: 32px 0 12px 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+}
+.preview-banner {
+  background: linear-gradient(90deg, #2d1b00 0%, #3a2200 100%);
+  border: 1px solid var(--warning);
+  color: var(--warning);
+  padding: 8px 16px;
+  border-radius: 6px;
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+.meta {
+  color: var(--text-dim);
+  font-size: 13px;
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.meta span strong { color: var(--text); }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  font-size: 13px;
+}
+th, td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+th {
+  background: var(--bg-hover);
+  font-weight: 600;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+th:hover { color: var(--text); }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: var(--bg-hover); }
+td.right { text-align: right; font-variant-numeric: tabular-nums; }
+.strat-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+.strat-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.pos { color: var(--positive); font-weight: 600; }
+.neg { color: var(--negative); font-weight: 600; }
+.dim { color: var(--text-dim); }
+
+.chart-card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.chart-container { position: relative; height: 360px; }
+
+.histogram-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+.histogram-card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+}
+.histogram-card .header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+.histogram-card .name { font-weight: 600; }
+.histogram-card .stat { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.histogram-container { height: 160px; }
+
+.cap-events {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px;
+  font-family: 'Cascadia Mono', 'Consolas', monospace;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.cap-events .event-line { padding: 2px 0; }
+.cap-events .strategy { color: var(--accent); }
+.cap-events .timestamp { color: var(--text-dim); }
+.cap-events .loss { color: var(--negative); }
+
+footer {
+  margin-top: 48px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 12px;
+  text-align: center;
+}
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <div class="preview-banner">
+    🎨 PREVIEW — these numbers are mock data for layout review. Real values come from the implemented backtester.
+  </div>
+  <h1>Polymarket BTC 5min Strategy Backtest</h1>
+  <div class="meta">
+    <span><strong>Period:</strong> 2026-04-09 → 2026-05-09</span>
+    <span><strong>Windows:</strong> 8,640</span>
+    <span><strong>σ:</strong> $82.4 (estimated)</span>
+    <span><strong>Friction:</strong> 1.5%</span>
+    <span><strong>Generated:</strong> 2026-05-09 10:42 UTC</span>
+  </div>
+</header>
+
+<h2>Summary</h2>
+<table>
+<thead>
+<tr>
+  <th>Strategy</th>
+  <th class="right">Total PnL</th>
+  <th class="right">EV / round</th>
+  <th class="right">Win rate</th>
+  <th class="right">Max DD</th>
+  <th class="right">Cap resets</th>
+  <th class="right">Skips</th>
+  <th class="right">Max step</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td><span class="strat-label"><span class="strat-dot" style="background:var(--strat1)"></span>1 — hold martingale</span></td>
+  <td class="right neg">-$612.40</td>
+  <td class="right neg">-$0.071</td>
+  <td class="right">50.2%</td>
+  <td class="right neg">-$307</td>
+  <td class="right">19</td>
+  <td class="right dim">183</td>
+  <td class="right">5</td>
+</tr>
+<tr>
+  <td><span class="strat-label"><span class="strat-dot" style="background:var(--strat2)"></span>2 — TP-only ($0.75)</span></td>
+  <td class="right neg">-$5,103.20</td>
+  <td class="right neg">-$0.591</td>
+  <td class="right">49.7%</td>
+  <td class="right neg">-$1,240</td>
+  <td class="right">156</td>
+  <td class="right dim">183</td>
+  <td class="right">5</td>
+</tr>
+<tr>
+  <td><span class="strat-label"><span class="strat-dot" style="background:var(--strat3)"></span>3 — TP+SL symmetric (0.55/0.45)</span></td>
+  <td class="right neg">-$481.30</td>
+  <td class="right neg">-$0.056</td>
+  <td class="right">49.4%</td>
+  <td class="right neg">-$98</td>
+  <td class="right">2</td>
+  <td class="right dim">183</td>
+  <td class="right">3</td>
+</tr>
+<tr>
+  <td><span class="strat-label"><span class="strat-dot" style="background:var(--strat4)"></span>4 — TP+SL asymmetric (0.85/0.45)</span></td>
+  <td class="right pos">+$2,847.10</td>
+  <td class="right pos">+$0.330</td>
+  <td class="right">28.5%</td>
+  <td class="right neg">-$185</td>
+  <td class="right">3</td>
+  <td class="right dim">183</td>
+  <td class="right">4</td>
+</tr>
+<tr>
+  <td><span class="strat-label"><span class="strat-dot" style="background:var(--strat5)"></span>5 — time-based (60s)</span></td>
+  <td class="right neg">-$502.85</td>
+  <td class="right neg">-$0.058</td>
+  <td class="right">49.8%</td>
+  <td class="right neg">-$112</td>
+  <td class="right">4</td>
+  <td class="right dim">183</td>
+  <td class="right">3</td>
+</tr>
+<tr>
+  <td><span class="strat-label"><span class="strat-dot" style="background:var(--strat6)"></span>6 — fixed stake $5 (baseline)</span></td>
+  <td class="right neg">-$641.90</td>
+  <td class="right neg">-$0.074</td>
+  <td class="right">50.0%</td>
+  <td class="right neg">-$87</td>
+  <td class="right dim">—</td>
+  <td class="right dim">183</td>
+  <td class="right dim">—</td>
+</tr>
+</tbody>
+</table>
+
+<h2>Equity curves (cumulative PnL over time)</h2>
+<div class="chart-card">
+  <div class="chart-container"><canvas id="equity"></canvas></div>
+</div>
+
+<h2>Per-strategy PnL distribution (per-round)</h2>
+<div class="histogram-grid" id="histograms">
+  <div class="histogram-card">
+    <div class="header"><span class="name" style="color:var(--strat1)">1 — hold martingale</span><span class="stat">μ=-$0.07</span></div>
+    <div class="histogram-container"><canvas id="hist1"></canvas></div>
+  </div>
+  <div class="histogram-card">
+    <div class="header"><span class="name" style="color:var(--strat2)">2 — TP-only</span><span class="stat">μ=-$0.59</span></div>
+    <div class="histogram-container"><canvas id="hist2"></canvas></div>
+  </div>
+  <div class="histogram-card">
+    <div class="header"><span class="name" style="color:var(--strat3)">3 — TP+SL symmetric</span><span class="stat">μ=-$0.06</span></div>
+    <div class="histogram-container"><canvas id="hist3"></canvas></div>
+  </div>
+  <div class="histogram-card">
+    <div class="header"><span class="name" style="color:var(--strat4)">4 — TP+SL asymmetric</span><span class="stat">μ=+$0.33</span></div>
+    <div class="histogram-container"><canvas id="hist4"></canvas></div>
+  </div>
+  <div class="histogram-card">
+    <div class="header"><span class="name" style="color:var(--strat5)">5 — time-based 60s</span><span class="stat">μ=-$0.06</span></div>
+    <div class="histogram-container"><canvas id="hist5"></canvas></div>
+  </div>
+  <div class="histogram-card">
+    <div class="header"><span class="name" style="color:var(--strat6)">6 — fixed baseline</span><span class="stat">μ=-$0.07</span></div>
+    <div class="histogram-container"><canvas id="hist6"></canvas></div>
+  </div>
+</div>
+
+<h2>Cap-trigger frequency (Martingale strategies only)</h2>
+<div class="chart-card">
+  <div class="chart-container" style="height:240px"><canvas id="capTrigger"></canvas></div>
+</div>
+
+<h2>Worst-case event log (first 5 cap resets per strategy)</h2>
+<div class="cap-events">
+<div class="event-line"><span class="strategy">[1_hold_martingale]</span>      <span class="timestamp">2026-04-11 03:25 UTC</span> — 5 consecutive losses, ladder 1→5, total <span class="loss">-$155.00</span></div>
+<div class="event-line"><span class="strategy">[1_hold_martingale]</span>      <span class="timestamp">2026-04-13 17:50 UTC</span> — 5 consecutive losses, ladder 1→5, total <span class="loss">-$155.00</span></div>
+<div class="event-line"><span class="strategy">[1_hold_martingale]</span>      <span class="timestamp">2026-04-15 09:05 UTC</span> — 5 consecutive losses, ladder 1→5, total <span class="loss">-$155.00</span></div>
+<div class="event-line"><span class="strategy">[1_hold_martingale]</span>      <span class="timestamp">2026-04-18 22:35 UTC</span> — 5 consecutive losses, ladder 1→5, total <span class="loss">-$155.00</span></div>
+<div class="event-line"><span class="strategy">[1_hold_martingale]</span>      <span class="timestamp">2026-04-19 14:10 UTC</span> — 5 consecutive losses, ladder 1→5, total <span class="loss">-$155.00</span></div>
+<div class="event-line"><span class="strategy">[2_tp_only]</span>              <span class="timestamp">2026-04-09 04:15 UTC</span> — 5 consecutive losses (no TP triggered), ladder 1→5, total <span class="loss">-$155.00</span></div>
+<div class="event-line"><span class="strategy">[2_tp_only]</span>              <span class="timestamp">2026-04-09 10:50 UTC</span> — 5 consecutive losses, ladder 1→5, total <span class="loss">-$155.00</span></div>
+<div class="event-line"><span class="strategy">[2_tp_only]</span>              <span class="timestamp">2026-04-09 18:25 UTC</span> — 5 consecutive losses, ladder 1→5, total <span class="loss">-$155.00</span></div>
+<div class="event-line"><span class="strategy">[2_tp_only]</span>              <span class="timestamp">2026-04-10 02:35 UTC</span> — 5 consecutive losses, ladder 1→5, total <span class="loss">-$155.00</span></div>
+<div class="event-line"><span class="strategy">[2_tp_only]</span>              <span class="timestamp">2026-04-10 09:55 UTC</span> — 5 consecutive losses, ladder 1→5, total <span class="loss">-$155.00</span></div>
+<div class="event-line"><span class="strategy">[3_tp_sl_symmetric]</span>      <span class="timestamp">2026-04-22 11:25 UTC</span> — 5 consecutive losses, ladder 1→5, total <span class="loss">-$15.00</span></div>
+<div class="event-line"><span class="strategy">[3_tp_sl_symmetric]</span>      <span class="timestamp">2026-05-02 08:40 UTC</span> — 5 consecutive losses, ladder 1→5, total <span class="loss">-$15.00</span></div>
+<div class="event-line"><span class="strategy">[4_tp_sl_asymmetric]</span>     <span class="timestamp">2026-04-14 13:55 UTC</span> — 5 consecutive losses, ladder 1→5, total <span class="loss">-$15.00</span></div>
+<div class="event-line"><span class="strategy">[4_tp_sl_asymmetric]</span>     <span class="timestamp">2026-04-25 19:30 UTC</span> — 5 consecutive losses, ladder 1→5, total <span class="loss">-$15.00</span></div>
+<div class="event-line"><span class="strategy">[4_tp_sl_asymmetric]</span>     <span class="timestamp">2026-05-04 05:20 UTC</span> — 5 consecutive losses, ladder 1→5, total <span class="loss">-$15.00</span></div>
+<div class="event-line"><span class="strategy">[5_time_60s]</span>             <span class="timestamp">2026-04-17 16:40 UTC</span> — 5 consecutive losses, ladder 1→5, total <span class="loss">-$15.00</span></div>
+<div class="event-line"><span class="strategy">[5_time_60s]</span>             <span class="timestamp">2026-04-28 22:05 UTC</span> — 5 consecutive losses, ladder 1→5, total <span class="loss">-$15.00</span></div>
+</div>
+
+<footer>
+  Polymarket BTC 5min Backtest — synthetic token prices via Black-Scholes oracle.
+  Source: <code>poly-backtest --start 2026-04-09 --end 2026-05-09</code>
+  · Cache: <code>~/.poly-backtest-cache/</code>
+</footer>
+
+</div>
+
+<script>
+// Mock data — these would be computed by the Rust backend in real reports.
+const colors = {
+  s1: '#58a6ff', s2: '#f85149', s3: '#3fb950',
+  s4: '#a371f7', s5: '#4ecdc4', s6: '#8b949e'
+};
+
+// === Equity curves ===
+// Generate 30 days of cumulative PnL data per strategy (~1 point/day)
+function genEquity(days, finalPnl, volatility, capDrops) {
+  const points = [];
+  let cumulative = 0;
+  const dailyDrift = finalPnl / days;
+  for (let d = 0; d < days; d++) {
+    const noise = (Math.random() - 0.5) * volatility;
+    let drop = 0;
+    if (capDrops.includes(d)) drop = -155;
+    cumulative += dailyDrift + noise + drop;
+    points.push(cumulative);
+  }
+  return points;
+}
+
+const days = 30;
+const labels = Array.from({length: days}, (_, i) => {
+  const d = new Date(2026, 3, 9 + i); // Apr 9 + i
+  return `${d.getMonth()+1}/${d.getDate()}`;
+});
+
+const equityData = {
+  labels,
+  datasets: [
+    {label:'1 hold mart',         data: genEquity(days, -612, 30, [2, 4, 6, 9, 10, 13, 15, 17, 19, 22, 24, 26, 28]),  borderColor: colors.s1, backgroundColor: colors.s1+'20', borderWidth: 1.5, tension:0.3, pointRadius:0},
+    {label:'2 TP-only',           data: genEquity(days, -5103, 80, Array.from({length:25}, (_,i)=>i)),                  borderColor: colors.s2, backgroundColor: colors.s2+'20', borderWidth: 1.5, tension:0.3, pointRadius:0},
+    {label:'3 TP+SL sym',         data: genEquity(days, -481, 18, [13, 23]),                                           borderColor: colors.s3, backgroundColor: colors.s3+'20', borderWidth: 1.5, tension:0.3, pointRadius:0},
+    {label:'4 TP+SL asym',        data: genEquity(days, 2847, 35, [5, 16, 25]),                                        borderColor: colors.s4, backgroundColor: colors.s4+'20', borderWidth: 2.5, tension:0.3, pointRadius:0},
+    {label:'5 time-60s',          data: genEquity(days, -502, 20, [8, 19, 24, 27]),                                    borderColor: colors.s5, backgroundColor: colors.s5+'20', borderWidth: 1.5, tension:0.3, pointRadius:0},
+    {label:'6 fixed baseline',    data: genEquity(days, -641, 22, []),                                                 borderColor: colors.s6, backgroundColor: colors.s6+'20', borderWidth: 1.5, tension:0.3, pointRadius:0},
+  ]
+};
+
+new Chart(document.getElementById('equity'), {
+  type: 'line',
+  data: equityData,
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { intersect: false, mode: 'index' },
+    plugins: {
+      legend: { position: 'top', labels: { color: '#e6edf3', font: { size: 12 } } },
+      tooltip: { backgroundColor: '#161b22', borderColor: '#30363d', borderWidth: 1 }
+    },
+    scales: {
+      x: { grid: { color: '#21262d' }, ticks: { color: '#8b949e' } },
+      y: { grid: { color: '#21262d' }, ticks: { color: '#8b949e', callback: v => '$'+v } }
+    }
+  }
+});
+
+// === Per-strategy histograms ===
+function genHist(buckets, distribution) {
+  // distribution is array of [center, weight]
+  return buckets.map(b => {
+    let total = 0;
+    for (const [center, weight] of distribution) {
+      const dist = Math.abs(b - center);
+      total += weight * Math.exp(-dist*dist / 50);
+    }
+    return total;
+  });
+}
+
+const bucketCenters = [-160, -80, -40, -20, -10, -5, 0, 5, 10, 20, 40, 80];
+const bucketLabels = bucketCenters.map(b => b >= 0 ? `+$${b}` : `-$${Math.abs(b)}`);
+
+function makeHist(canvasId, color, distribution) {
+  const data = genHist(bucketCenters, distribution);
+  new Chart(document.getElementById(canvasId), {
+    type: 'bar',
+    data: {
+      labels: bucketLabels,
+      datasets: [{ data, backgroundColor: color, borderColor: color, borderWidth: 0 }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: '#8b949e', font: { size: 9 } } },
+        y: { grid: { color: '#21262d' }, ticks: { color: '#8b949e', font: { size: 9 } } }
+      }
+    }
+  });
+}
+
+// Each strategy's distribution: [[pnl_center, weight], ...]
+makeHist('hist1', colors.s1, [[-160, 0.05], [-80, 0.08], [-40, 0.12], [-5, 0.30], [5, 0.30], [10, 0.10], [20, 0.05]]);
+makeHist('hist2', colors.s2, [[-160, 0.18], [-80, 0.10], [-40, 0.08], [-5, 0.18], [2.5, 0.42], [5, 0.04]]);
+makeHist('hist3', colors.s3, [[-160, 0.005], [-5, 0.3], [-0.5, 0.3], [0.5, 0.3], [5, 0.07]]);
+makeHist('hist4', colors.s4, [[-160, 0.01], [-5, 0.12], [-0.5, 0.55], [3.5, 0.28], [5, 0.04]]);
+makeHist('hist5', colors.s5, [[-160, 0.01], [-5, 0.08], [-2, 0.32], [2, 0.32], [5, 0.20], [10, 0.05]]);
+makeHist('hist6', colors.s6, [[-5, 0.50], [5, 0.50]]);
+
+// === Cap trigger histogram (per-day count) ===
+const capDays = labels;
+const capCounts = {
+  '1_hold_mart':     [0,0,1,0,1,0,1,0,0,1,1,0,0,1,0,1,0,1,0,0,1,0,1,0,1,0,1,0,1,0],
+  '2_tp_only':       [0,5,4,5,5,4,5,4,5,4,5,4,5,4,5,4,5,4,5,4,5,4,5,4,5,4,5,4,5,4],
+  '3_tp_sl_sym':     [0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0],
+  '4_tp_sl_asym':    [0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,1,0,0,0,0],
+  '5_time_60s':      [0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,1,0,0,1,0,0],
+};
+
+new Chart(document.getElementById('capTrigger'), {
+  type: 'bar',
+  data: {
+    labels: capDays,
+    datasets: [
+      {label:'1 hold mart',  data: capCounts['1_hold_mart'],  backgroundColor: colors.s1},
+      {label:'2 TP-only',    data: capCounts['2_tp_only'],    backgroundColor: colors.s2},
+      {label:'3 TP+SL sym',  data: capCounts['3_tp_sl_sym'],  backgroundColor: colors.s3},
+      {label:'4 TP+SL asym', data: capCounts['4_tp_sl_asym'], backgroundColor: colors.s4},
+      {label:'5 time-60s',   data: capCounts['5_time_60s'],   backgroundColor: colors.s5},
+    ]
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: { position: 'top', labels: { color: '#e6edf3', font: { size: 12 } } },
+      tooltip: { backgroundColor: '#161b22', borderColor: '#30363d', borderWidth: 1 }
+    },
+    scales: {
+      x: { stacked: true, grid: { display: false }, ticks: { color: '#8b949e' } },
+      y: { stacked: true, grid: { color: '#21262d' }, ticks: { color: '#8b949e' }, title: { display: true, text: 'Cap reset count', color: '#8b949e' } }
+    }
+  }
+});
+
+// Sortable table — click header to sort
+const table = document.querySelector('table');
+table.querySelectorAll('th').forEach((th, idx) => {
+  let asc = true;
+  th.addEventListener('click', () => {
+    const tbody = table.querySelector('tbody');
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    rows.sort((a, b) => {
+      const av = a.children[idx].textContent.trim().replace(/[$,%]/g, '').replace('+', '');
+      const bv = b.children[idx].textContent.trim().replace(/[$,%]/g, '').replace('+', '');
+      const an = parseFloat(av);
+      const bn = parseFloat(bv);
+      if (!isNaN(an) && !isNaN(bn)) return asc ? an - bn : bn - an;
+      return asc ? av.localeCompare(bv) : bv.localeCompare(av);
+    });
+    rows.forEach(r => tbody.appendChild(r));
+    asc = !asc;
+  });
+});
+</script>
+</body>
+</html>
