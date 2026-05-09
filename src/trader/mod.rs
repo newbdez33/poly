@@ -10,3 +10,4 @@ pub mod scheduler;
 pub mod errors;
 pub mod adapters;
 pub mod price;
+pub mod exit_watcher;
