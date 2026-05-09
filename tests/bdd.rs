@@ -4,6 +4,10 @@ use poly_tui::{
     app::{self, AppState},
     domain::{AppEvent, Balance, RefreshStatus},
     refresher::{self, Cmd},
+    trader::ladder::{
+        apply_outcome, Direction as TDirection, LadderState as TLadderState,
+        SkipReason, StopReason as TStopReason, WindowOutcome,
+    },
 };
 use ratatui::{Terminal, backend::TestBackend};
 use rust_decimal::Decimal;
@@ -26,6 +30,7 @@ struct AppWorld {
     cmd_tx: Option<mpsc::Sender<Cmd>>,
     event_tx: Option<mpsc::Sender<AppEvent>>,
     last_buffer: String,
+    trader_ladder: Option<TLadderState>,
 }
 
 impl AppWorld {
@@ -38,6 +43,7 @@ impl AppWorld {
             cmd_tx: None,
             event_tx: None,
             last_buffer: String::new(),
+            trader_ladder: None,
         }
     }
 }
@@ -148,6 +154,106 @@ async fn then_should_quit(world: &mut AppWorld) {
     let state = world.state.as_ref().expect("state initialized");
     assert!(state.should_quit, "expected should_quit=true");
 }
+
+// ── Trader BDD step definitions ──────────────────────────────────────────────
+
+#[given(regex = r#"^direction "([^"]+)", base \$(\d+), max_step (\d+)$"#)]
+async fn given_session(world: &mut AppWorld, dir: String, base: u32, max_step: u32) {
+    let direction = match dir.as_str() {
+        "UP" => TDirection::Up,
+        "DOWN" => TDirection::Down,
+        _ => panic!("bad direction: {dir}"),
+    };
+    world.trader_ladder = Some(TLadderState::new(
+        direction,
+        Decimal::from(base),
+        max_step as u8,
+        Utc::now(),
+    ));
+}
+
+#[given("trader has fresh ladder state")]
+async fn given_fresh(_world: &mut AppWorld) {}
+
+#[given(regex = r"^ladder at step (\d+)$")]
+async fn given_ladder_at_step(world: &mut AppWorld, n: String) {
+    if let Some(l) = world.trader_ladder.as_mut() {
+        l.current_step = n.parse::<u8>().expect("step parse");
+    }
+}
+
+#[when(regex = r#"^the trader records a win paying \$([0-9.]+) on a \$([0-9.]+) bet$"#)]
+async fn when_win(world: &mut AppWorld, proceeds: String, _bet: String) {
+    let l = world.trader_ladder.as_mut().expect("ladder not initialised");
+    let next = apply_outcome(
+        l,
+        &WindowOutcome::Won {
+            proceeds_usd: Decimal::from_str(&proceeds).unwrap(),
+        },
+        Utc::now(),
+    );
+    *l = next;
+}
+
+#[when(regex = r#"^the trader records a loss of \$([0-9.]+)$"#)]
+async fn when_loss(world: &mut AppWorld, spent: String) {
+    let l = world.trader_ladder.as_mut().expect("ladder not initialised");
+    let next = apply_outcome(
+        l,
+        &WindowOutcome::Lost {
+            spent_usd: Decimal::from_str(&spent).unwrap(),
+        },
+        Utc::now(),
+    );
+    *l = next;
+}
+
+#[when("the trader records a skipped window")]
+async fn when_skip(world: &mut AppWorld) {
+    let l = world.trader_ladder.as_mut().expect("ladder not initialised");
+    let next = apply_outcome(
+        l,
+        &WindowOutcome::Skipped {
+            reason: SkipReason::FillOrKillFailed,
+        },
+        Utc::now(),
+    );
+    *l = next;
+}
+
+#[when("the trader loses 5 windows in a row")]
+async fn when_loses_5(world: &mut AppWorld) {
+    let l = world.trader_ladder.as_mut().expect("ladder not initialised");
+    for _ in 0..5 {
+        let bet = l.current_bet_usd();
+        let next = apply_outcome(l, &WindowOutcome::Lost { spent_usd: bet }, Utc::now());
+        *l = next;
+    }
+}
+
+#[then(regex = r#"^ladder step is (\d+)$"#)]
+async fn then_step(world: &mut AppWorld, expected: u32) {
+    let l = world.trader_ladder.as_ref().expect("ladder not initialised");
+    assert_eq!(l.current_step, expected as u8, "step mismatch");
+}
+
+#[then(regex = r#"^realized_pnl is \$(-?[0-9.]+)$"#)]
+async fn then_pnl(world: &mut AppWorld, expected: String) {
+    let l = world.trader_ladder.as_ref().expect("ladder not initialised");
+    assert_eq!(
+        l.realized_pnl_usd,
+        Decimal::from_str(&expected).unwrap(),
+        "realized_pnl mismatch"
+    );
+}
+
+#[then("session_stopped is CapReached")]
+async fn then_cap(world: &mut AppWorld) {
+    let l = world.trader_ladder.as_ref().expect("ladder not initialised");
+    assert_eq!(l.stopped, Some(TStopReason::CapReached));
+}
+
+// ── End trader step definitions ───────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() {
