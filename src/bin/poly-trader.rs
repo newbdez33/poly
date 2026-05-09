@@ -3,17 +3,20 @@ use clap::Parser;
 use poly_tui::config::Config;
 use poly_tui::trader::adapters::{
     clob_executor_wrapper::ClobOrderExecutor,
+    gamma_price_wrapper::GammaPriceFetcher,
     gamma_wrapper::GammaMarketDiscovery,
     redis_state_wrapper::RedisTraderState,
     redis_stream_wrapper::RedisTraderStream,
     simulated_executor::SimulatedExecutor,
 };
-use poly_tui::trader::config::TraderArgs;
+use poly_tui::trader::config::{ExitRuleArg, TraderArgs};
 use poly_tui::trader::errors::StateError;
 use poly_tui::trader::event::TraderEventEmitter;
 use poly_tui::trader::executor::OrderExecutor;
+use poly_tui::trader::exit_watcher::ExitConfig;
 use poly_tui::trader::ladder::{Direction, LadderState};
 use poly_tui::trader::market::MarketDiscovery;
+use poly_tui::trader::price::MidwindowPriceFetcher;
 use poly_tui::trader::resolver::{PolymarketResolver, WindowResolver};
 use poly_tui::trader::scheduler::{run, SchedulerConfig, SchedulerDeps, WindowExecutor};
 use poly_tui::trader::state::TraderStateStore;
@@ -105,8 +108,8 @@ async fn main() -> Result<()> {
         shutdown_sig.cancel();
     });
 
-    let price: Arc<dyn poly_tui::trader::price::MidwindowPriceFetcher> = Arc::new(
-        poly_tui::trader::adapters::gamma_price_wrapper::GammaPriceFetcher::new(gamma_host.clone()),
+    let price: Arc<dyn MidwindowPriceFetcher> = Arc::new(
+        GammaPriceFetcher::new(gamma_host.clone()),
     );
 
     // WindowExecutor adapter (binds run_window over our deps)
@@ -118,14 +121,12 @@ async fn main() -> Result<()> {
         price: price.clone(),
     });
     let exit_cfg = match args.exit_rule {
-        poly_tui::trader::config::ExitRuleArg::Hold => None,
-        poly_tui::trader::config::ExitRuleArg::TpSl => Some(
-            poly_tui::trader::exit_watcher::ExitConfig {
-                tp_price: args.tp_price.expect("validated: --tp-price required"),
-                sl_price: args.sl_price.expect("validated: --sl-price required"),
-                poll: std::time::Duration::from_secs(args.poll_secs as u64),
-            }
-        ),
+        ExitRuleArg::Hold => None,
+        ExitRuleArg::TpSl => Some(ExitConfig {
+            tp_price: args.tp_price.expect("validated: --tp-price required"),
+            sl_price: args.sl_price.expect("validated: --sl-price required"),
+            poll: std::time::Duration::from_secs(args.poll_secs as u64),
+        }),
     };
     let window_cfg = WindowConfig {
         band_min: args.band_min,
