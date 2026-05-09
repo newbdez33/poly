@@ -114,7 +114,9 @@ pub async fn run_window(
         }
         Some(exit_cfg) => {
             // v1.5 path: race ExitWatcher vs await_resolution
-            run_with_tp_sl(deps, ladder, &market, &token_id, &buy_fill, exit_cfg, buy_dollars).await
+            run_with_tp_sl(
+                deps, ladder, &market, &token_id, &buy_fill, exit_cfg, buy_dollars, window_ts,
+            ).await
         }
     }
 }
@@ -175,11 +177,17 @@ async fn run_with_tp_sl(
     buy_fill: &FillResult,
     exit_cfg: &crate::trader::exit_watcher::ExitConfig,
     buy_dollars: Decimal,
+    window_ts: i64,
 ) -> WindowOutcome {
     use crate::trader::exit_watcher::ExitWatcher;
     let watcher = ExitWatcher::new(deps.price.clone(), exit_cfg.clone());
-    // Window closes 5 min after window_ts; allow a small grace for resolver post-close.
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(290);
+    // Watcher should stop polling no later than the actual window close
+    // (window_ts + 300s). Anchor deadline to absolute window-close time so
+    // it doesn't drift with buy-fill latency.
+    let close_unix = window_ts + 300;
+    let now_unix = chrono::Utc::now().timestamp();
+    let remaining = (close_unix - now_unix).max(0) as u64;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(remaining);
 
     let trigger: Option<crate::trader::exit_watcher::ExitTrigger> = tokio::select! {
         t = watcher.watch(token_id, deadline) => t,
@@ -683,7 +691,10 @@ mod tests {
             sl_price: Decimal::from_str("0.45").unwrap(),
             poll: std::time::Duration::from_millis(100),
         });
-        let outcome = run_window(&deps, &cfg, &fresh_ladder(), 1700000300).await;
+        // window_ts must be in the wall-clock future so deadline = now + 300s
+        // (vs. now + 0s, which would skip watcher polling entirely).
+        let future_ts = chrono::Utc::now().timestamp() + 60;
+        let outcome = run_window(&deps, &cfg, &fresh_ladder(), future_ts).await;
         assert!(matches!(outcome,
             WindowOutcome::Won { ref proceeds_usd } if *proceeds_usd == Decimal::from_str("8.40").unwrap()));
         let kinds = emitter.kinds();
@@ -718,11 +729,50 @@ mod tests {
             sl_price: Decimal::from_str("0.45").unwrap(),
             poll: std::time::Duration::from_millis(100),
         });
-        let outcome = run_window(&deps, &cfg, &fresh_ladder(), 1700000300).await;
+        // window_ts must be in the wall-clock future so deadline = now + 300s
+        // (vs. now + 0s, which would skip watcher polling entirely).
+        let future_ts = chrono::Utc::now().timestamp() + 60;
+        let outcome = run_window(&deps, &cfg, &fresh_ladder(), future_ts).await;
         assert!(matches!(outcome,
             WindowOutcome::Lost { ref spent_usd } if *spent_usd == Decimal::from_str("0.60").unwrap()));
         let kinds = emitter.kinds();
         assert!(kinds.iter().any(|k| matches!(k, TraderEventKind::ExitTriggered { kind: ExitKind::Sl, .. })));
+    }
+
+    #[tokio::test]
+    async fn tp_sl_watcher_skips_when_window_already_closed() {
+        // window_ts already 10 min in the past → close_unix < now → deadline = now.
+        // Watcher returns None immediately. Fall-through resolver returns Timeout
+        // (using StubResolver::timeout) so the outcome is Skipped{ResolutionTimeout}.
+        // This proves: (a) watcher saw deadline-already-past and returned None
+        // without firing, and (b) the deadline fall-through resolver path was taken.
+        let market = open_market_with_token_ids();
+        let emitter = CapturingEmitter::new();
+        let deps = WindowDeps {
+            market: StubMarket::ok(market),
+            executor: StubExec::buy_only(Ok(FillResult {
+                fill_price: Decimal::from_str("0.50").unwrap(),
+                shares: Decimal::from(10),
+                dollars: Decimal::from(5),
+            })),
+            resolver: StubResolver::timeout(),
+            emitter: emitter.clone(),
+            // price stub never triggers; should not be polled because deadline is in the past.
+            price: stub_price("0.50"),
+        };
+        let cfg = cfg_with_exit(ExitConfig {
+            tp_price: Decimal::from_str("0.85").unwrap(),
+            sl_price: Decimal::from_str("0.45").unwrap(),
+            poll: std::time::Duration::from_millis(100),
+        });
+        let past_window_ts = chrono::Utc::now().timestamp() - 600;
+        let outcome = run_window(&deps, &cfg, &fresh_ladder(), past_window_ts).await;
+        assert!(matches!(outcome,
+            WindowOutcome::Skipped { reason: SkipReason::ResolutionTimeout }),
+            "past-deadline window must fall through to resolver and hit timeout");
+        let kinds = emitter.kinds();
+        assert!(!kinds.iter().any(|k| matches!(k, TraderEventKind::ExitTriggered { .. })),
+                "no ExitTriggered event when watcher deadline is already past");
     }
 
     #[tokio::test(start_paused = true)]
