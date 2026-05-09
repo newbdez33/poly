@@ -1,6 +1,7 @@
 use crate::app::TraderHealth;
 use crate::domain::{Balance, HealthLed, RefreshStatus};
 use crate::trader::event::TraderEvent;
+use crate::tui::market_watch::MarketState;
 use chrono::{DateTime, Utc};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -22,6 +23,7 @@ pub struct UiState {
     pub trader_log: Vec<TraderEvent>,
     pub trader_latest: Option<TraderEvent>,
     pub trader_health: TraderHealth,
+    pub market: Option<MarketState>,
 }
 
 pub fn render(frame: &mut Frame, state: &UiState) {
@@ -30,6 +32,7 @@ pub fn render(frame: &mut Frame, state: &UiState) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(5), // balance
+            Constraint::Length(1), // market strip (NEW)
             Constraint::Length(1), // trader sub-title
             Constraint::Min(0),    // trader log
             Constraint::Length(1), // status bar
@@ -37,9 +40,10 @@ pub fn render(frame: &mut Frame, state: &UiState) {
         .split(area);
 
     render_balance(frame, chunks[0], state);
-    render_trader_subtitle(frame, chunks[1], state);
-    render_trader_log(frame, chunks[2], state);
-    render_status_bar(frame, chunks[3], state);
+    render_market_strip(frame, chunks[1], state); // NEW
+    render_trader_subtitle(frame, chunks[2], state);
+    render_trader_log(frame, chunks[3], state);
+    render_status_bar(frame, chunks[4], state);
 }
 
 fn render_balance(frame: &mut Frame, area: Rect, state: &UiState) {
@@ -155,6 +159,95 @@ fn trader_health_to_led(h: TraderHealth) -> HealthLed {
     }
 }
 
+fn render_market_strip(frame: &mut Frame, area: Rect, state: &UiState) {
+    use rust_decimal::Decimal;
+
+    let m = match &state.market {
+        Some(m) => m,
+        None => {
+            frame.render_widget(Paragraph::new(" BTC: -- "), area);
+            return;
+        }
+    };
+
+    let mut spans: Vec<Span> = Vec::new();
+    spans.push(Span::raw(" BTC "));
+
+    match (m.price_to_beat, m.current_price) {
+        (Some(p), Some(c)) => {
+            spans.push(Span::raw(format_usd_int(p)));
+            spans.push(Span::raw(" \u{2192} "));
+            spans.push(Span::raw(format_usd_int(c)));
+            let diff = c - p;
+            let (sign, color) = if diff > Decimal::ZERO {
+                ("+", Color::Green)
+            } else if diff < Decimal::ZERO {
+                ("", Color::Red)
+            } else {
+                ("\u{00b1}", Color::White)
+            };
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                format!("{sign}{}", format_usd_int(diff)),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ));
+        }
+        (None, Some(c)) => {
+            spans.push(Span::raw("--"));
+            spans.push(Span::raw(" \u{2192} "));
+            spans.push(Span::raw(format_usd_int(c)));
+            spans.push(Span::raw("  --"));
+        }
+        (Some(p), None) => {
+            spans.push(Span::raw(format_usd_int(p)));
+            spans.push(Span::raw(" \u{2192} "));
+            spans.push(Span::styled(
+                "--",
+                Style::default().fg(Color::DarkGray),
+            ));
+            spans.push(Span::raw("  --"));
+        }
+        (None, None) => {
+            spans.push(Span::raw("--"));
+        }
+    }
+
+    spans.push(Span::raw("   "));
+    let now_ts = state.now.timestamp();
+    let secs = m.seconds_to_next_boundary(now_ts);
+    if secs > 0 && secs < 300 {
+        spans.push(Span::raw(format!("\u{23f1} {}:{:02}", secs / 60, secs % 60)));
+    } else {
+        spans.push(Span::styled(
+            "\u{23f1} rolling\u{2026}",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn format_usd_int(d: rust_decimal::Decimal) -> String {
+    use rust_decimal::prelude::ToPrimitive;
+    let n: i64 = d.round().to_i64().unwrap_or(0);
+    if n < 0 {
+        format!("-{}", group_thousands(&(-n).to_string()))
+    } else {
+        group_thousands(&n.to_string())
+    }
+}
+
+fn group_thousands(s: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+
 fn build_status_line<'a>(state: &'a UiState) -> Line<'a> {
     let mut spans = Vec::new();
     spans.extend(led_span("CLOB", state.clob_health));
@@ -249,7 +342,70 @@ mod tests {
             trader_log: log,
             trader_latest: latest,
             trader_health: health,
+            market: None,
         }
+    }
+
+    use crate::tui::market_watch::MarketState;
+
+    fn ui_state_with_market(market: Option<MarketState>) -> UiState {
+        UiState {
+            balance: Some(Balance {
+                usdc: Decimal::from_str("100").unwrap(),
+                fetched_at: fixed_now(),
+            }),
+            last_refresh: None,
+            clob_health: HealthLed::Green,
+            redis_health: HealthLed::Green,
+            refresh_interval: Duration::from_secs(30),
+            now: fixed_now(),
+            trader_log: vec![],
+            trader_latest: None,
+            trader_health: TraderHealth::NotStarted,
+            market,
+        }
+    }
+
+    fn make_market(price_to_beat: Option<&str>, current: Option<&str>) -> MarketState {
+        let mut m = MarketState::empty();
+        m.window_ts = Some(fixed_now().timestamp() / 300 * 300);
+        m.price_to_beat = price_to_beat.map(|s| Decimal::from_str(s).unwrap());
+        m.current_price = current.map(|s| Decimal::from_str(s).unwrap());
+        m
+    }
+
+    #[test]
+    fn renders_market_no_data() {
+        let state = ui_state_with_market(None);
+        insta::assert_snapshot!("market_no_data", render_to_buffer(&state));
+    }
+
+    #[test]
+    fn renders_market_full() {
+        let state = ui_state_with_market(Some(make_market(Some("80425"), Some("80431"))));
+        insta::assert_snapshot!("market_full", render_to_buffer(&state));
+    }
+
+    #[test]
+    fn renders_market_negative_diff() {
+        let state = ui_state_with_market(Some(make_market(Some("80425"), Some("80418"))));
+        insta::assert_snapshot!("market_negative_diff", render_to_buffer(&state));
+    }
+
+    #[test]
+    fn renders_market_only_current() {
+        let state = ui_state_with_market(Some(make_market(None, Some("80431"))));
+        insta::assert_snapshot!("market_only_current", render_to_buffer(&state));
+    }
+
+    #[test]
+    fn renders_market_rolling() {
+        let mut s = ui_state_with_market(Some(make_market(Some("80425"), Some("80425"))));
+        // Set now to a 5-min boundary so seconds_to_next_boundary returns 300,
+        // triggering the "rolling..." display path.
+        let boundary = fixed_now().timestamp() / 300 * 300;
+        s.now = chrono::Utc.timestamp_opt(boundary, 0).unwrap();
+        insta::assert_snapshot!("market_rolling", render_to_buffer(&s));
     }
 
     #[test]
@@ -269,6 +425,7 @@ mod tests {
             trader_log: vec![],
             trader_latest: None,
             trader_health: TraderHealth::NotStarted,
+            market: None,
         };
         let out = render_to_buffer(&state);
         insta::assert_snapshot!("ui_with_balance", out);
@@ -286,6 +443,7 @@ mod tests {
             trader_log: vec![],
             trader_latest: None,
             trader_health: TraderHealth::NotStarted,
+            market: None,
         };
         let out = render_to_buffer(&state);
         insta::assert_snapshot!("ui_no_balance", out);
@@ -309,6 +467,7 @@ mod tests {
             trader_log: vec![],
             trader_latest: None,
             trader_health: TraderHealth::NotStarted,
+            market: None,
         };
         let out = render_to_buffer(&state);
         insta::assert_snapshot!("ui_failure", out);
