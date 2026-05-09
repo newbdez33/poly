@@ -105,6 +105,20 @@ Only `4_tp_sl_asymmetric` (TP $0.85 / SL $0.45) is profitable in this window. **
 
 ---
 
+## v1.5 — TP/SL exits in trader ✅ COMPLETE
+
+Strategy 4 (validated by backtest +$5K-$10K/30d) lives behind `--exit-rule tp-sl --tp-price 0.85 --sl-price 0.45`. Default behavior unchanged. See `docs/superpowers/specs/2026-05-10-trader-tp-sl-design.md`.
+
+- [x] CLI: `--exit-rule {hold|tp-sl}`, `--tp-price`, `--sl-price`, `--poll-secs`
+- [x] `MidwindowPriceFetcher` trait + `GammaPriceFetcher` adapter
+- [x] `ExitWatcher` polling loop, `ExitConfig`, `ExitTrigger`, `ExitKind`
+- [x] `run_window` branches on `cfg.exit`, races watcher vs resolver via `tokio::select!`
+- [x] `TraderEventKind::ExitTriggered { kind, bid, proceeds_usd }`
+- [x] Outcome mapped from `proceeds vs cost`; ladder math unchanged
+- [x] E2E: `ExitTriggered` round-trips through Redis stream
+
+---
+
 ## v1.3 — Daemon / TUI 拆分（方案 2 重构）
 
 **触发条件：** 准备扩展交易逻辑（多策略、热加载配置、动态切方向）时，必须先做这次拆分。当前 v1.1 trader 单方向 + dry-run 够用，但任何更复杂的形态都要先把 daemon 做出来。

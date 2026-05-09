@@ -135,8 +135,9 @@ See `TODO.md`. Highlights:
 - **v1.1** ✅ — Polymarket BTC 5-min Martingale trader (`poly-trader` binary)
 - **v1.2** ✅ — BTC market watch strip (live Chainlink price + countdown)
 - **v1.4** ✅ — backtest framework (`poly-backtest` binary, 6 strategies, HTML report)
+- **v1.5** ✅ — TP/SL exits in trader (`--exit-rule tp-sl`)
 - **v1.3** — daemon / TUI split. Required before any new trading logic (multi-strategy, dynamic config, etc.)
-- **v1.5+** — strategy selection driven by v1.4 backtest, markets, positions, observability
+- **v1.6+** — strategy selection driven by v1.4 backtest, markets, positions, observability
 
 ## Documentation
 
@@ -148,6 +149,8 @@ See `TODO.md`. Highlights:
 - `docs/superpowers/plans/2026-05-09-market-watch-strip.md` — v1.2 plan (12 tasks)
 - `docs/superpowers/specs/2026-05-09-backtest-framework-design.md` — v1.4 backtest design
 - `docs/superpowers/plans/2026-05-09-backtest-framework.md` — v1.4 plan (14 tasks)
+- `docs/superpowers/specs/2026-05-10-trader-tp-sl-design.md` — v1.5 design
+- `docs/superpowers/plans/2026-05-10-trader-tp-sl.md` — v1.5 plan
 - `TODO.md` — roadmap and v1.3 daemon split plan
 
 ## Trader
@@ -167,6 +170,36 @@ poly-tui    # observe events in another terminal
 ```bash
 poly-trader --direction up --base 5
 ```
+
+### Take-profit / stop-loss exits (v1.5, strategy 4)
+
+Backtest validated strategy 4 (TP+SL asymmetric) profitable across three independent 30-day samples (+$5,088 / +$9,802 / +$7,747). To run it live (start in dry-run):
+
+```bash
+poly-trader --direction up --base 5 --dry-run \
+  --exit-rule tp-sl --tp-price 0.85 --sl-price 0.45
+```
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--exit-rule` | `hold` | `hold` = v1.1 behavior. `tp-sl` enables strategy 4. |
+| `--tp-price` | — | Required for `tp-sl`. UP-token bid level that triggers a take-profit sell. |
+| `--sl-price` | — | Required for `tp-sl`. UP-token bid level that triggers a stop-loss sell. |
+| `--poll-secs` | `5` | Gamma poll cadence during the window (1..=30). |
+
+**Expected event order** (one TP-trigger window):
+`WindowOpening -> EntryDecision{Enter} -> OrderPlaced -> OrderFilled -> ExitTriggered{Tp,bid,proceeds} -> SellFilled -> LadderUpdated`
+
+**Inspect trigger rate from Redis:**
+
+```bash
+docker exec poly-redis redis-cli XREVRANGE poly:prod:trader:events + - COUNT 100 \
+  | grep -c ExitTriggered
+```
+
+Backtest distribution: ~29% TP, ~58% SL, ~13% deadline fall-through. If your live trace is far off, suspect gamma `last_price` lag.
+
+**Fall back to v1.1:** omit `--exit-rule` (or pass `--exit-rule hold`). No state migration needed; the ladder is mode-agnostic.
 
 ### Stop / resume
 
