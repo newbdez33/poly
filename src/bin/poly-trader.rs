@@ -49,11 +49,11 @@ async fn main() -> Result<()> {
             .context("connecting Redis stream")?);
     let market: Arc<dyn MarketDiscovery> =
         Arc::new(GammaMarketDiscovery::new(gamma_host));
-    // 360s = 5min window + 60s post-close grace for Polymarket to mark closed=true.
-    // Resolver polls from buy time, so the timeout must cover the full window
-    // duration plus settlement delay.
+    // 600s = 5min window + 5min post-close grace. With gamma-api caching
+    // defeated by the wrapper's cache-bust param, closure should be visible
+    // within ~30s of actual close, but the wider window absorbs CDN tail.
     let resolver: Arc<dyn WindowResolver> =
-        Arc::new(PolymarketResolver::new(market.clone(), Duration::from_secs(360)));
+        Arc::new(PolymarketResolver::new(market.clone(), Duration::from_secs(600)));
 
     let executor: Arc<dyn OrderExecutor> = if args.dry_run {
         Arc::new(SimulatedExecutor::default())
