@@ -10,7 +10,11 @@ use poly_tui::{
     domain::{AppEvent, RefreshStatus},
     input, refresher::{self, Cmd},
     trader::adapters::redis_stream_wrapper::RedisTraderStream,
+    trader::adapters::chainlink_btc_wrapper::HttpChainlinkFeed,
+    trader::adapters::gamma_wrapper::GammaMarketDiscovery,
+    trader::market::MarketDiscovery,
     tui::events::TraderEventStream,
+    tui::market_watch::{self, BtcPriceFeed},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::{io, sync::Arc, time::Duration};
@@ -54,6 +58,22 @@ async fn main() -> anyhow::Result<()> {
             Ok(s) => Some(Arc::new(s)),
             Err(e) => {
                 tracing::warn!("trader stream subscribe failed: {e} — TUI shows 'not started'");
+                None
+            }
+        };
+
+    let gamma_host = std::env::var("GAMMA_HOST")
+        .unwrap_or_else(|_| "https://gamma-api.polymarket.com".into());
+
+    let market_for_watch: Option<Arc<dyn MarketDiscovery>> = Some(Arc::new(
+        GammaMarketDiscovery::new(gamma_host)
+    ));
+
+    let price_feed: Option<Arc<dyn BtcPriceFeed>> =
+        match HttpChainlinkFeed::connect(&cfg.polygon_rpc_url).await {
+            Ok(f) => Some(Arc::new(f)),
+            Err(e) => {
+                tracing::warn!("Chainlink RPC connect failed: {e} — BTC strip shows --");
                 None
             }
         };
@@ -126,6 +146,15 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {})
     };
 
+    let event_tx_market = event_tx.clone();
+    let shutdown_market = shutdown.clone();
+    let h_market = match (price_feed, market_for_watch) {
+        (Some(feed), Some(market)) => {
+            tokio::spawn(market_watch::run(feed, market, event_tx_market, shutdown_market))
+        }
+        _ => tokio::spawn(async move {}),
+    };
+
     // Set up terminal
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
@@ -150,7 +179,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Cleanup
     shutdown.cancel();
-    let _ = tokio::join!(h_refresh, h_input, h_status, h_trader);
+    let _ = tokio::join!(h_refresh, h_input, h_status, h_trader, h_market);
 
     app_result
 }
