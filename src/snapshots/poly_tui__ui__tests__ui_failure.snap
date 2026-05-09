@@ -6,11 +6,11 @@ expression: out
 │                       USDC: $100.00                      │
 │                                                          │
 │                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
-│                                                          │
 └──────────────────────────────────────────────────────────┘
-● CLOB  ● Redis   refresh: 30s  last: failed (Network timeou
+ Trader  not started — run `poly-trader`                    
+                                                            
+                                                            
+                                                            
+                                                            
+                                                            
+● CLOB  ● Redis  ● Trader  refresh: 30s  last: failed (Netwo

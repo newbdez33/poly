@@ -57,6 +57,9 @@ impl AppState {
             redis_health,
             refresh_interval: self.refresh_interval,
             now,
+            trader_log: self.trader_log.iter().cloned().collect(),
+            trader_latest: self.trader_latest.clone(),
+            trader_health: self.trader_health,
         }
     }
 }
