@@ -9,3 +9,4 @@ pub mod window;
 pub mod scheduler;
 pub mod errors;
 pub mod adapters;
+pub mod price;
