@@ -37,6 +37,21 @@ impl OrderExecutor for SimulatedExecutor {
         let dollars = self.sell_price * shares;
         Ok(FillResult { fill_price: self.sell_price, shares, dollars })
     }
+
+    async fn sell_at_bid(
+        &self,
+        _token: &str,
+        shares: Decimal,
+        bid_hint: Decimal,
+    ) -> Result<FillResult, ExecError> {
+        // Apply a small slippage haircut so dry-run reflects real CLOB fill
+        // realism: sell market orders cross the spread; assume 1% under the
+        // observed bid. Floor at 0 so a trigger near zero doesn't go negative.
+        let slip = Decimal::from_str("0.99").unwrap();
+        let fill_price = (bid_hint * slip).max(Decimal::ZERO);
+        let dollars = fill_price * shares;
+        Ok(FillResult { fill_price, shares, dollars })
+    }
 }
 
 #[cfg(test)]
@@ -54,5 +69,32 @@ mod tests {
         let ex = SimulatedExecutor::default();
         let f = ex.sell_market("any", Decimal::from(10)).await.unwrap();
         assert_eq!(f.dollars, Decimal::from_str("9.90").unwrap());
+    }
+
+    #[tokio::test]
+    async fn sell_at_bid_uses_hint_with_slippage() {
+        // SL trigger at bid=0.45, 10 shares → fill at 0.45 * 0.99 = 0.4455 → $4.455
+        let ex = SimulatedExecutor::default();
+        let f = ex.sell_at_bid("any", Decimal::from(10), Decimal::from_str("0.45").unwrap())
+            .await.unwrap();
+        assert_eq!(f.fill_price, Decimal::from_str("0.4455").unwrap());
+        assert_eq!(f.dollars, Decimal::from_str("4.455").unwrap());
+    }
+
+    #[tokio::test]
+    async fn sell_at_bid_with_tp_trigger_returns_winning_proceeds() {
+        // TP trigger at bid=0.85, 10 shares → fill at 0.85 * 0.99 = 0.8415 → $8.415
+        let ex = SimulatedExecutor::default();
+        let f = ex.sell_at_bid("any", Decimal::from(10), Decimal::from_str("0.85").unwrap())
+            .await.unwrap();
+        assert!(f.dollars > Decimal::from(5), "TP should still beat $5 cost");
+        assert_eq!(f.dollars, Decimal::from_str("8.415").unwrap());
+    }
+
+    #[tokio::test]
+    async fn sell_at_bid_floors_at_zero() {
+        let ex = SimulatedExecutor::default();
+        let f = ex.sell_at_bid("any", Decimal::from(10), Decimal::ZERO).await.unwrap();
+        assert_eq!(f.dollars, Decimal::ZERO);
     }
 }

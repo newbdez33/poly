@@ -223,8 +223,9 @@ async fn run_with_tp_sl(
         bid: trig.bid,
     }).await;
 
-    // TP or SL fired. Sell now and report outcome based on proceeds vs cost.
-    let sell_fill = match deps.executor.sell_market(token_id, buy_fill.shares).await {
+    // TP or SL fired. Sell with the trigger bid as a fill-price hint so dry-run
+    // simulation reflects trigger context (real CLOB ignores the hint).
+    let sell_fill = match deps.executor.sell_at_bid(token_id, buy_fill.shares, trig.bid).await {
         Ok(f) => f,
         Err(e) => {
             emit_kind(deps, ladder, TraderEventKind::SellRejected { reason: format!("{e}") }).await;

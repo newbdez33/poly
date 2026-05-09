@@ -188,7 +188,7 @@ poly-trader --direction up --base 5 --dry-run \
 | `--poll-secs` | `5` | Gamma poll cadence during the window (1..=30). |
 
 **Expected event order** (one TP-trigger window):
-`WindowOpening -> EntryDecision{Enter} -> OrderPlaced -> OrderFilled -> ExitTriggered{Tp,bid,proceeds} -> SellFilled -> LadderUpdated`
+`WindowOpening -> EntryDecision{Enter} -> OrderPlaced -> OrderFilled -> ExitTriggered{Tp,bid} -> SellFilled -> LadderUpdated`
 
 **Inspect trigger rate from Redis:**
 
@@ -197,7 +197,7 @@ docker exec poly-redis redis-cli XREVRANGE poly:prod:trader:events + - COUNT 100
   | grep -c ExitTriggered
 ```
 
-Backtest distribution: ~29% TP, ~58% SL, ~13% deadline fall-through. If your live trace is far off, suspect gamma `last_price` lag.
+Backtest distribution: ~29% TP, ~58% SL, ~13% deadline fall-through. If your live trace is far off, suspect gamma `outcomePrices` lag.
 
 **Fall back to v1.1:** omit `--exit-rule` (or pass `--exit-rule hold`). No state migration needed; the ladder is mode-agnostic.
 

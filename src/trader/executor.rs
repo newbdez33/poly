@@ -15,6 +15,19 @@ pub struct FillResult {
 pub trait OrderExecutor: Send + Sync {
     async fn buy_fok(&self, token_id: &str, dollars: Decimal) -> Result<FillResult, ExecError>;
     async fn sell_market(&self, token_id: &str, shares: Decimal) -> Result<FillResult, ExecError>;
+
+    /// Sell `shares` of `token_id` with a hint of the bid we observed at trigger
+    /// time. Real impls (CLOB) ignore the hint and fall through to `sell_market`.
+    /// Dry-run impls use the hint as fill price so simulated PnL reflects the
+    /// trigger context (e.g. an SL-trigger fill should price at ~SL bid, not $0.99).
+    async fn sell_at_bid(
+        &self,
+        token_id: &str,
+        shares: Decimal,
+        _bid_hint: Decimal,
+    ) -> Result<FillResult, ExecError> {
+        self.sell_market(token_id, shares).await
+    }
 }
 
 /// Number of whole shares to buy with `dollars` at `ask`. Rounds DOWN so we never
