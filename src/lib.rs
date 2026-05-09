@@ -8,3 +8,4 @@ pub mod ui;
 pub mod input;
 pub mod trader;
 pub mod tui;
+pub mod backtest;
