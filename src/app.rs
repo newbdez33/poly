@@ -82,6 +82,7 @@ pub fn handle_event(state: &mut AppState, ev: AppEvent, cmd_tx: &mpsc::Sender<Cm
             state.trader_log.push_back(ev.clone());
             state.trader_latest = Some(ev);
         }
+        AppEvent::MarketUpdate(_) => {}
     }
 }
 

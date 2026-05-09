@@ -6,6 +6,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::trader::event::TraderEvent;
+use crate::tui::market_watch::MarketState;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Balance {
@@ -55,6 +56,7 @@ pub enum AppEvent {
     Refresh(RefreshStatus),
     Shutdown,
     TraderEvent(TraderEvent),
+    MarketUpdate(MarketState),
 }
 
 #[derive(Error, Debug)]

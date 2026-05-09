@@ -72,6 +72,61 @@ impl MarketState {
     }
 }
 
+use crate::domain::AppEvent;
+use crate::trader::market::MarketDiscovery;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+/// Floor a UTC epoch second to its 5-minute boundary.
+fn floor_5min(now_ts: i64) -> i64 {
+    now_ts - now_ts.rem_euclid(300)
+}
+
+async fn emit(tx: &mpsc::Sender<AppEvent>, state: &MarketState) {
+    let _ = tx.send(AppEvent::MarketUpdate(state.clone())).await;
+}
+
+pub async fn run(
+    price_feed: Arc<dyn BtcPriceFeed>,
+    market: Arc<dyn MarketDiscovery>,
+    event_tx: mpsc::Sender<AppEvent>,
+    shutdown: CancellationToken,
+) {
+    let mut state = MarketState::empty();
+    let mut rpc_ticker = tokio::time::interval(Duration::from_secs(5));
+    let mut gamma_ticker = tokio::time::interval(Duration::from_secs(15));
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => break,
+
+            _ = rpc_ticker.tick() => {
+                if let Ok(p) = price_feed.latest_price().await {
+                    state.current_price = Some(p);
+                    state.last_rpc_ok_at = Some(chrono::Utc::now());
+                }
+                emit(&event_tx, &state).await;
+            }
+
+            _ = gamma_ticker.tick() => {
+                let now_ts = chrono::Utc::now().timestamp();
+                let current_window = floor_5min(now_ts);
+                if state.window_ts != Some(current_window) {
+                    if let Ok(m) = market.find_window(current_window).await {
+                        state.window_ts = Some(current_window);
+                        state.price_to_beat = m.price_to_beat;
+                        state.last_gamma_ok_at = Some(chrono::Utc::now());
+                        emit(&event_tx, &state).await;
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +249,168 @@ mod tests {
         assert!(s.current_price.is_none());
         assert!(s.last_rpc_ok_at.is_none());
         assert!(s.last_gamma_ok_at.is_none());
+    }
+
+    use crate::trader::errors::MarketError;
+    use crate::trader::market::{MarketDiscovery, WindowMarket};
+    use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+    use std::time::Duration;
+    use crate::domain::AppEvent;
+
+    struct FakePriceFeed {
+        result: Mutex<Result<Decimal, MarketWatchError>>,
+    }
+    impl FakePriceFeed {
+        fn ok(price: &str) -> Arc<Self> {
+            Arc::new(Self {
+                result: Mutex::new(Ok(Decimal::from_str(price).unwrap())),
+            })
+        }
+        fn fail() -> Arc<Self> {
+            Arc::new(Self {
+                result: Mutex::new(Err(MarketWatchError::Rpc("forced".into()))),
+            })
+        }
+    }
+    #[async_trait]
+    impl BtcPriceFeed for FakePriceFeed {
+        async fn latest_price(&self) -> Result<Decimal, MarketWatchError> {
+            match &*self.result.lock().unwrap() {
+                Ok(p) => Ok(*p),
+                Err(_) => Err(MarketWatchError::Rpc("forced".into())),
+            }
+        }
+    }
+
+    struct FakeMarket {
+        responses: Mutex<Vec<Result<WindowMarket, MarketError>>>,
+    }
+    impl FakeMarket {
+        fn with_price_to_beat(p: &str) -> Arc<Self> {
+            Arc::new(Self {
+                responses: Mutex::new(vec![Ok(WindowMarket {
+                    window_ts: 0,
+                    slug: "test".into(),
+                    up_token_id: "u".into(),
+                    down_token_id: "d".into(),
+                    up_ask: Decimal::ZERO,
+                    down_ask: Decimal::ZERO,
+                    closed: false,
+                    winner: None,
+                    price_to_beat: Some(Decimal::from_str(p).unwrap()),
+                })]),
+            })
+        }
+        fn always_fail() -> Arc<Self> {
+            Arc::new(Self {
+                responses: Mutex::new(vec![]),
+            })
+        }
+    }
+    #[async_trait]
+    impl MarketDiscovery for FakeMarket {
+        async fn find_window(&self, _ts: i64) -> Result<WindowMarket, MarketError> {
+            let mut q = self.responses.lock().unwrap();
+            if q.is_empty() {
+                return Err(MarketError::NotFound { window_ts: 0 });
+            }
+            q[0].clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn run_emits_after_first_rpc_tick() {
+        tokio::time::pause();
+        let feed = FakePriceFeed::ok("80000");
+        let market = FakeMarket::with_price_to_beat("80100");
+        let (tx, mut rx) = mpsc::channel::<AppEvent>(64);
+        let shutdown = CancellationToken::new();
+
+        let task = tokio::spawn(run(feed, market, tx, shutdown.clone()));
+        // Yield once so the spawned task can register its intervals before we advance.
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(6)).await;
+        tokio::task::yield_now().await;
+
+        let mut got_market = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::MarketUpdate(s) = ev {
+                if s.current_price == Some(Decimal::from(80000)) {
+                    got_market = true;
+                    break;
+                }
+            }
+        }
+        assert!(got_market, "expected MarketUpdate with current_price 80000");
+
+        shutdown.cancel();
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn run_emits_price_to_beat_at_gamma_tick() {
+        tokio::time::pause();
+        let feed = FakePriceFeed::ok("80000");
+        let market = FakeMarket::with_price_to_beat("80100");
+        let (tx, mut rx) = mpsc::channel::<AppEvent>(64);
+        let shutdown = CancellationToken::new();
+
+        let task = tokio::spawn(run(feed, market, tx, shutdown.clone()));
+        // Yield once so the spawned task can register its intervals before we advance.
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(20)).await;
+        tokio::task::yield_now().await;
+
+        let mut latest_state: Option<MarketState> = None;
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::MarketUpdate(s) = ev {
+                latest_state = Some(s);
+            }
+        }
+        let s = latest_state.expect("at least one MarketUpdate");
+        assert_eq!(s.price_to_beat, Some(Decimal::from(80100)));
+
+        shutdown.cancel();
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn run_keeps_emitting_when_rpc_fails() {
+        tokio::time::pause();
+        let feed = FakePriceFeed::fail();
+        let market = FakeMarket::always_fail();
+        let (tx, mut rx) = mpsc::channel::<AppEvent>(64);
+        let shutdown = CancellationToken::new();
+
+        let task = tokio::spawn(run(feed, market, tx, shutdown.clone()));
+        // Yield once so the spawned task can register its intervals before we advance.
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(11)).await;
+        tokio::task::yield_now().await;
+
+        let mut count = 0;
+        while let Ok(_) = rx.try_recv() { count += 1; }
+        assert!(count > 0, "expected at least one MarketUpdate even on RPC failure");
+
+        shutdown.cancel();
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn run_exits_on_shutdown() {
+        tokio::time::pause();
+        let feed = FakePriceFeed::ok("80000");
+        let market = FakeMarket::always_fail();
+        let (tx, _rx) = mpsc::channel::<AppEvent>(64);
+        let shutdown = CancellationToken::new();
+
+        let task = tokio::spawn(run(feed, market, tx, shutdown.clone()));
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), task).await
+            .expect("task exits within 1s")
+            .expect("no panic");
     }
 }

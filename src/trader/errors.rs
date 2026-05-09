@@ -28,7 +28,7 @@ pub enum StreamError {
     Decode(String),
 }
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum MarketError {
     #[error("market not found for window {window_ts}")]
     NotFound { window_ts: i64 },
