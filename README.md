@@ -134,8 +134,9 @@ See `TODO.md`. Highlights:
 - **v1.0** ✅ — TUI starter (USDC balance display)
 - **v1.1** ✅ — Polymarket BTC 5-min Martingale trader (`poly-trader` binary)
 - **v1.2** ✅ — BTC market watch strip (live Chainlink price + countdown)
+- **v1.4** ✅ — backtest framework (`poly-backtest` binary, 6 strategies, HTML report)
 - **v1.3** — daemon / TUI split. Required before any new trading logic (multi-strategy, dynamic config, etc.)
-- **v1.4+** — markets, positions, advanced strategies, observability
+- **v1.5+** — strategy selection driven by v1.4 backtest, markets, positions, observability
 
 ## Documentation
 
@@ -145,6 +146,8 @@ See `TODO.md`. Highlights:
 - `docs/superpowers/plans/2026-05-09-poly-trader-martingale.md` — v1.1 plan (23 tasks)
 - `docs/superpowers/specs/2026-05-09-market-watch-strip-design.md` — v1.2 BTC strip design
 - `docs/superpowers/plans/2026-05-09-market-watch-strip.md` — v1.2 plan (12 tasks)
+- `docs/superpowers/specs/2026-05-09-backtest-framework-design.md` — v1.4 backtest design
+- `docs/superpowers/plans/2026-05-09-backtest-framework.md` — v1.4 plan (14 tasks)
 - `TODO.md` — roadmap and v1.3 daemon split plan
 
 ## Trader
@@ -203,6 +206,74 @@ Configure the Polygon RPC endpoint via `POLYGON_RPC_URL` in `.env` (default:
 `https://polygon-rpc.com`). If the default endpoint is rate-limited (HTTP 401
 "API key disabled" is a known intermittent issue with the public RPC), use a
 maintained provider URL like Alchemy or Infura.
+
+## Backtest framework
+
+`poly-backtest` runs 6 trading strategies (Martingale variants + a fixed-stake
+baseline) against historical Polymarket BTC 5-min markets and writes a
+self-contained HTML comparison report. Used for **strategy selection before
+deploying real money**.
+
+### Quick start
+
+```bash
+# Run a 30-day backtest on all 6 strategies
+cargo run --release --bin poly-backtest -- \
+  --start 2026-04-09 --end 2026-05-09 \
+  --output backtest-report.html
+
+# Open backtest-report.html in any browser
+```
+
+First run: ~15-25 min (downloads gamma + Binance data; ~50MB cache at
+`~/.poly-backtest-cache/`). Subsequent runs: <1 min (cache hits).
+
+### Strategies tested
+
+1. `1_hold_martingale` — current v1.1 trader behavior (hold to resolution)
+2. `2_tp_only_martingale` — take-profit at $0.75, no stop-loss
+3. `3_tp_sl_symmetric` — TP $0.55 / SL $0.45
+4. `4_tp_sl_asymmetric` — TP $0.85 / SL $0.45 (cut-loss-early)
+5. `5_time_60s_martingale` — sell after 60 s
+6. `6_fixed_stake_baseline` — $5 every round, no Martingale
+
+### Headline results (30-day, 2026-04-09 → 2026-05-09)
+
+σ ≈ $85.18 / 5min, friction 1.5%.
+
+| Strategy | PnL | Win rate | Cap resets |
+|---|---:|---:|---:|
+| 1_hold_martingale       |    -$984 | 49.4% |  42 |
+| 2_tp_only_martingale    |  -$3,817 | 55.5% |  20 |
+| 3_tp_sl_symmetric       |  -$1,063 | 44.5% | 100 |
+| 4_tp_sl_asymmetric      |  **+$5,088** | 29.2% | 179 |
+| 5_time_60s_martingale   |  -$1,701 | 43.9% |  77 |
+| 6_fixed_stake_baseline  | -$10,701 | 49.4% |  42 |
+
+Only `4_tp_sl_asymmetric` is profitable in this window. See
+`backtest-report.html` for equity curves, per-round PnL histograms, and
+cap-reset event logs.
+
+### Architecture
+
+- BTC token prices synthesized via Black-Scholes binary-option oracle
+  (BTC 1-min Binance closes → token bid/ask, parameterised by σ + friction)
+- Reuses v1.1's `LadderState` + `apply_outcome` Martingale FSM unchanged
+- Single-page HTML report with Chart.js (CDN)
+- Independent of trader/TUI runtime — backtest doesn't touch live processes
+- Disk cache at `~/.poly-backtest-cache/` (gamma windows + Binance candles)
+
+```bash
+# Run all backtest unit tests (42+ tests)
+cargo test --lib backtest
+
+# Network smoke test (1-day end-to-end, hits real gamma + Binance)
+cargo test --test backtest_smoke -- --ignored
+```
+
+See `docs/superpowers/specs/2026-05-09-backtest-framework-design.md` and
+`docs/superpowers/plans/2026-05-09-backtest-framework.md` for full design and
+task breakdown.
 
 ## License
 

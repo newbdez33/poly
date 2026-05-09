@@ -76,6 +76,35 @@ src/
 
 ---
 
+## v1.4 — Backtest Framework ✅ COMPLETE
+
+- [x] `poly-backtest` binary, offline strategy comparison
+- [x] 6 strategy variants (hold / TP-only / TP+SL sym / TP+SL asym / time-based / fixed)
+- [x] Black-Scholes synthetic token-price model + σ estimation from BTC 1-min closes
+- [x] HTML report with Chart.js (single self-contained file, dark theme)
+- [x] Disk cache for gamma + Binance data (`~/.poly-backtest-cache/`)
+- [x] 193 unit tests + 1 ignored network smoke test (`tests/backtest_smoke.rs`)
+- [x] Zero modifications to v1.1 trader code (reuses `LadderState` + `apply_outcome`)
+
+**Output:** `backtest-report.html` shows EV / win rate / max drawdown / cap resets per strategy across the chosen window.
+
+**30-day headline (2026-04-09 → 2026-05-09, σ ≈ $85.18 / 5min, friction 1.5%):**
+
+| Strategy | PnL | Win rate | Cap resets |
+|---|---:|---:|---:|
+| 1_hold_martingale       |    -$984 | 49.4% |  42 |
+| 2_tp_only_martingale    |  -$3,817 | 55.5% |  20 |
+| 3_tp_sl_symmetric       |  -$1,063 | 44.5% | 100 |
+| 4_tp_sl_asymmetric      | **+$5,088** | 29.2% | 179 |
+| 5_time_60s_martingale   |  -$1,701 | 43.9% |  77 |
+| 6_fixed_stake_baseline  | -$10,701 | 49.4% |  42 |
+
+Only `4_tp_sl_asymmetric` (TP $0.85 / SL $0.45) is profitable in this window. **Decides:** which strategy to deploy in v1.5, or whether to abandon Martingale entirely.
+
+**Coverage (`cargo llvm-cov --lib --ignore-filename-regex 'src/bin|src/trader/adapters/|.*_wrapper\.rs'`):** 90.14% lines / 88.93% regions overall. Backtest module: `config.rs` 100%, `runner.rs` 100%, `report.rs` 98.65%, `stats.rs` 98.50%, `oracle.rs` 97.46%, `exit_rule.rs` 97.71%. Lower-coverage backtest files are network-IO paths (`binance.rs` 45%, `gamma_history.rs` 76%, `loader.rs` 3%) — covered by the ignored `backtest_smoke` test against live APIs, not the fast lib pass.
+
+---
+
 ## v1.3 — Daemon / TUI 拆分（方案 2 重构）
 
 **触发条件：** 准备扩展交易逻辑（多策略、热加载配置、动态切方向）时，必须先做这次拆分。当前 v1.1 trader 单方向 + dry-run 够用，但任何更复杂的形态都要先把 daemon 做出来。
