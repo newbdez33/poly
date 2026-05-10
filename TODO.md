@@ -160,6 +160,59 @@ Live position display in the TUI balance box, sourced from `data-api.polymarket.
 
 ---
 
+## v1.7 — Limit-order maker mode (待 24h 真钱数据后决定)
+
+**触发条件：** 24 小时真钱跑完，确认 backtest 模型在实盘成立后再启动。
+
+**思路：** 用挂单（限价单 / maker）代替市价单（taker），节省 1–2% 手续费 + 更精确的成交价。
+
+### 核心设计
+
+```
+窗口开始：
+  ├── 挂限价 BUY @ 0.49（maker, 0% 费）
+  │     如果 5s 内没成交 → 升价至 0.50 → 0.51（升价 sweep）
+  │     如果到 30s 还没成交 → 放弃，跳过窗口
+
+进入持仓状态：
+  ├── 立即挂限价 SELL @ 0.85（TP，maker, 0% 费）
+  └── 启动 ExitWatcher（监控 SL = 0.45）
+       SL 触发 → 取消挂着的 0.85 卖单 → 市价卖（taker, 1% 费）
+       到窗口末没触发 → 取消 0.85 卖单 → 走结算路径
+```
+
+### 关键约束
+
+- **止损（SL）必须保留市价单**——限价 SL 在 BTC 跳水时不会成交，会被困住到结算 → 全损
+- 所以是混合模式：TP 挂单（maker）+ SL 市价（taker）+ 进场挂单（maker）
+
+### 实现工作量
+
+- `OrderExecutor` 新增 `place_limit_order(token, side, price, shares)` + `cancel_order(id)`
+- Window state 跟踪 order ID（`buy_order_id`, `tp_order_id`）
+- `run_window` 大改：从"立即买"变成"挂单等成交 → 升价 sweep → 超时跳过"
+- 处理三方 race condition：TP 成交 vs SL 触发 vs 窗口结束
+- 最好用 CLOB websocket 订阅 fill 事件（否则要轮询 fills 端点）
+- 测试：单元 + e2e，至少覆盖 TP-成交、SL-触发-取消-TP、超时-取消
+
+工作量约 v1.5 trader 改动的 1.5–2 倍，是个独立 v1.7 spec。
+
+### 收益估算
+
+按 backtest 30 天 ~290 个窗口、约 100 个 TP 成交（29% 触发率）：
+
+- 每个 TP 省约 $0.05–$0.85（取决于 step 1–5）
+- 加权省下：约 $30–$80 / 30 天
+- backtest strategy 4 是 +$7,500/30 天 → **节省 0.4–1.1%**
+
+### 决策门槛
+
+- 如果 24h 真钱跑出实际盈利 → 投入 v1.7 工作合理
+- 如果实盘 PnL 偏离 backtest >20% → 先排查模型问题，v1.7 暂缓
+- 如果想先简单测试，可以**直接调 TP 0.85 → 0.83** 吸收 taker 费（0 代码改动）
+
+---
+
 ## v1.3 — Daemon / TUI 拆分（方案 2 重构）
 
 **触发条件：** 准备扩展交易逻辑（多策略、热加载配置、动态切方向）时，必须先做这次拆分。当前 v1.1 trader 单方向 + dry-run 够用，但任何更复杂的形态都要先把 daemon 做出来。
