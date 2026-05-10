@@ -87,6 +87,11 @@ pub fn strategy_set() -> Vec<StrategyConfig> {
         common("4_tp_sl_asymmetric",      ExitRule::TpSlOrHold { tp_price: dec!(0.85), sl_price: dec!(0.45) }, mart()),
         common("5_time_60s_martingale",   ExitRule::FixedTime { seconds: 60 },                     mart()),
         common("6_fixed_stake_baseline",  ExitRule::HoldToResolution,                              StakeRule::Fixed { stake: dec!(5) }),
+        common("7_tp85_sl40",             ExitRule::TpSlOrHold { tp_price: dec!(0.85), sl_price: dec!(0.40) }, mart()),
+        common("8_tp85_sl35",             ExitRule::TpSlOrHold { tp_price: dec!(0.85), sl_price: dec!(0.35) }, mart()),
+        common("9_tp85_sl30",             ExitRule::TpSlOrHold { tp_price: dec!(0.85), sl_price: dec!(0.30) }, mart()),
+        common("10_tp85_sl25",            ExitRule::TpSlOrHold { tp_price: dec!(0.85), sl_price: dec!(0.25) }, mart()),
+        common("11_tp85_sl20",            ExitRule::TpSlOrHold { tp_price: dec!(0.85), sl_price: dec!(0.20) }, mart()),
     ]
 }
 
@@ -120,12 +125,13 @@ mod tests {
     }
 
     #[test]
-    fn strategy_set_has_six_strategies() {
+    fn strategy_set_has_eleven_strategies() {
         let s = strategy_set();
-        assert_eq!(s.len(), 6);
+        assert_eq!(s.len(), 11);
         let names: Vec<&str> = s.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"1_hold_martingale"));
         assert!(names.contains(&"6_fixed_stake_baseline"));
+        assert!(names.contains(&"11_tp85_sl20"));
     }
 
     #[test]
@@ -134,7 +140,7 @@ mod tests {
         let mut names: Vec<&String> = s.iter().map(|c| &c.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 6);
+        assert_eq!(names.len(), 11);
     }
 
     #[test]
@@ -155,8 +161,33 @@ mod tests {
     #[test]
     fn filter_all_returns_everything() {
         let s = strategy_set();
-        assert_eq!(filter_strategies(&s, "all").len(), 6);
-        assert_eq!(filter_strategies(&s, "").len(), 6);
+        assert_eq!(filter_strategies(&s, "all").len(), 11);
+        assert_eq!(filter_strategies(&s, "").len(), 11);
+    }
+
+    #[test]
+    fn strategy_set_includes_sl_sweep_variants() {
+        let s = strategy_set();
+        let sweep_names = ["7_tp85_sl40", "8_tp85_sl35", "9_tp85_sl30", "10_tp85_sl25", "11_tp85_sl20"];
+        for name in sweep_names {
+            let entry = s.iter().find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("strategy '{name}' missing"));
+            match &entry.exit {
+                ExitRule::TpSlOrHold { tp_price, sl_price } => {
+                    assert_eq!(*tp_price, dec!(0.85), "{name} TP wrong");
+                    let expected_sl = match name {
+                        "7_tp85_sl40" => dec!(0.40),
+                        "8_tp85_sl35" => dec!(0.35),
+                        "9_tp85_sl30" => dec!(0.30),
+                        "10_tp85_sl25" => dec!(0.25),
+                        "11_tp85_sl20" => dec!(0.20),
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(*sl_price, expected_sl, "{name} SL wrong");
+                }
+                _ => panic!("{name} should be TpSlOrHold"),
+            }
+        }
     }
 
     #[test]
