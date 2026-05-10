@@ -140,6 +140,7 @@ See `TODO.md`. Highlights:
 - **v1.7** ✅ — Maker mode (`--maker` limit-order entry + TP)
 - **v1.7.1** ✅ — `--window-minutes 5|15|60` flag (TUI auto-detects)
 - **v1.7.2** ✅ — Backtest oracle noise + SL parameter sweep
+- **v1.7.5** ✅ — Real Polymarket trade-history backtest (`--oracle real`, strategies 12/13)
 - **v1.3** — daemon / TUI split. Required before any new trading logic (multi-strategy, dynamic config, etc.)
 - **v1.8+** — strategy selection driven by v1.4 backtest, markets, observability
 
@@ -161,6 +162,8 @@ See `TODO.md`. Highlights:
 - `docs/superpowers/plans/2026-05-10-window-minutes.md` — v1.7.1 plan
 - `docs/superpowers/specs/2026-05-10-backtest-oracle-noise-design.md` — v1.7.2 design
 - `docs/superpowers/plans/2026-05-10-backtest-oracle-noise.md` — v1.7.2 plan
+- `docs/superpowers/specs/2026-05-10-real-trade-backtest-design.md` — v1.7.5 design
+- `docs/superpowers/plans/2026-05-10-real-trade-backtest.md` — v1.7.5 plan
 - `TODO.md` — roadmap and v1.3 daemon split plan
 
 ## Trader
@@ -436,6 +439,36 @@ poly-backtest --start 2026-04-09 --end 2026-05-09 \
 **Strategy sweep**: strategies 7-11 vary `sl_price ∈ {0.40, 0.35, 0.30, 0.25, 0.20}` with TP fixed at 0.85, mirroring the v1.5 trader's `--exit-rule tp-sl` parameters.
 
 **Calibration:** start with σ=0.0 (baseline), σ=0.03 (mild), σ=0.05 (matches today's observed gap-down). Re-run after collecting 24h of real-money trigger data and tune to match observed SL rate ±10%.
+
+### Real Polymarket trade-history oracle (v1.7.5)
+
+Replaces theoretical BS with **actual recorded SELL/BUY trades** from Polymarket's data-api. Auto-fetches uncached windows on first run; cached at `~/.poly-backtest-cache/trades/<window_ts>.json`.
+
+```bash
+# First run on a 30-day range — auto-fetches trades (~17 min, throttled).
+poly-backtest --start 2026-04-09 --end 2026-05-09 --oracle real \
+  --output report-real.html
+
+# Subsequent runs reuse cache (~30s):
+poly-backtest --start 2026-04-09 --end 2026-05-09 --oracle real \
+  --strategies 12_tp75_early_exit_270,13_hold_early_exit_270 \
+  --output report-real-candidates.html
+```
+
+| `--oracle` | Source | Friction | Determinism |
+|---|---|---|---|
+| `bs` (default) | Black-Scholes mid + symmetric friction | `--friction` (default 1.5%) | exact |
+| `noisy` | BS + per-tick Gaussian noise | `--friction` + `--oracle-noise` | seeded reproducible |
+| `real` | Last in-window SELL/BUY trade | embedded in observed prices | exact (data-driven) |
+
+**New strategies (added v1.7.5):**
+
+- `12_tp75_early_exit_270`: BUY in band → limit TP @ 0.75 → at t=270s, market-sell residual at bid. No resolution path.
+- `13_hold_early_exit_270`: BUY in band → hold → at t=270s, market-sell at bid. No resolution path.
+
+Both candidates exit BEFORE window resolution (t=300s) to avoid post-resolution redemption (which currently requires MATIC the EOA doesn't have). Pre-trade fallback is a flat 0.5 (no forward-look bias).
+
+`strategy_set()` now returns 13 strategies (1-11 unchanged + 12 + 13). `--oracle bs` (default) reproduces v1.7.2 numbers byte-identically.
 
 ## License
 

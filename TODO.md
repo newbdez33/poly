@@ -54,13 +54,50 @@ Sweep results (Apr-May, 8509 windows, σ ∈ {0.0, 0.03, 0.05, 0.08}):
 1. **`1_hold_martingale`** — already implemented as `--exit-rule hold` (default). No code change needed.
 2. **`2_tp_only_martingale`** — needs v1.8 implementation (`--exit-rule tp-only` flag, fork `sell_with_tp_sl` to drop the SL arm).
 
-**No further σ-sweep / 15m / 60m / real-trade-history work** until 1_hold or tp_only proves profitable in live A/B. v1.7.3 / v1.7.4 / v1.7.5 are deprioritized — they were optimizing a strategy we no longer trust.
+**No further σ-sweep / 15m / 60m work** until 1_hold or tp_only proves profitable in live A/B. v1.7.3 / v1.7.4 are deprioritized — they were optimizing a strategy we no longer trust.
 
 Reports saved: `report-noise-0.html`, `report-noise-3.html`, `report-noise-5.html`, `report-noise-8.html`. Keep for reference.
 
 ---
 
-## v1.8 — `--exit-rule tp-only` trader candidate ⏳ TODO (NEXT)
+## v1.7.5 — Real Polymarket trade-history backtest ✅ COMPLETE
+
+Validated two early-exit candidates against ground-truth trade data instead of Black-Scholes theoretical:
+
+- `12_tp75_early_exit_270` — TP=0.75 → fall through to t=270s market-sell at bid
+- `13_hold_early_exit_270` — hold → t=270s market-sell at bid
+
+Both exit BEFORE window resolution (t=300s), avoiding the on-chain redemption blocker (EOA has no MATIC for `redeemPositions` gas).
+
+**New code:**
+- `--oracle bs|noisy|real` flag with `bs` default (v1.7.2 behavior preserved)
+- `RealTradeOracle` reads Polymarket data-api `/trades?market=<conditionId>` (paginated, 100ms throttle, per-window JSON cache at `~/.poly-backtest-cache/trades/`)
+- `WindowMeta.condition_id: Option<String>` (back-compat with old caches via `#[serde(default)]`)
+- `ExitRule::TpOnlyOrEarlyExit { tp_price, exit_at_secs }` variant
+- 2 new strategies → `strategy_set()` now returns 13
+
+**Decision rule for v1.8 (run after operator validates with real data):**
+
+- If `12_tp75_early_exit_270` PnL > 0: implement v1.8 with `--exit-rule tp-only`, `--tp-price 0.75`, `--exit-at-secs 270`.
+- If `13_hold_early_exit_270` PnL > 0 (and 12 ≤ 0): implement v1.8b with `FixedTime { seconds: 270 }` semantics.
+- If both PnL ≤ 0: abandon Polymarket 5min market.
+
+Operator workflow:
+```bash
+# First run on a 30-day range — auto-fetches uncached windows (~17 min).
+poly-backtest --start 2026-04-09 --end 2026-05-09 --oracle real --output report-real.html
+
+# Subsequent cached re-runs (~30s):
+poly-backtest --start 2026-04-09 --end 2026-05-09 --oracle real \
+  --strategies 12_tp75_early_exit_270,13_hold_early_exit_270 \
+  --output report-real-candidates.html
+```
+
+Spec: `docs/superpowers/specs/2026-05-10-real-trade-backtest-design.md`. Plan: `docs/superpowers/plans/2026-05-10-real-trade-backtest.md`.
+
+---
+
+## v1.8 — `--exit-rule tp-only` trader candidate ⏳ TODO (NEXT — gated by v1.7.5 real-trade results)
 
 **Decision (2026-05-10):** Strategy 4 abandoned. Two surviving candidates: `1_hold_martingale` (already implemented as `--exit-rule hold` default) and `2_tp_only_martingale` (this work).
 
@@ -83,7 +120,6 @@ These all assumed strategy 4 was worth chasing. Since strategy 4 is abandoned, t
 
 - **v1.7.3** — extend backtest to 15m / 60m windows
 - **v1.7.4** — autocorrelated noise (AR(1)) in oracle
-- **v1.7.5** — real Polymarket trade history backtest (replace BS oracle entirely)
 
 ---
 
