@@ -89,6 +89,9 @@ pub fn handle_event(state: &mut AppState, ev: AppEvent, cmd_tx: &mpsc::Sender<Cm
         AppEvent::MarketUpdate(s) => {
             state.market = Some(s);
         }
+        AppEvent::PositionsUpdate(_) => {
+            // Wired in Task 6 — temporarily ignore to keep the match exhaustive.
+        }
     }
 }
 

@@ -5,6 +5,7 @@ use std::str::FromStr;
 use std::time::Duration;
 use thiserror::Error;
 
+use crate::positions::Positions;
 use crate::trader::event::TraderEvent;
 use crate::tui::market_watch::MarketState;
 
@@ -57,6 +58,7 @@ pub enum AppEvent {
     Shutdown,
     TraderEvent(TraderEvent),
     MarketUpdate(MarketState),
+    PositionsUpdate(Positions),
 }
 
 #[derive(Error, Debug)]
@@ -132,5 +134,13 @@ mod tests {
         // 100s after, interval 30s → > 3x → red
         let led = HealthLed::from_clob_age(Some(&s), Duration::from_secs(30), ts(1100));
         assert_eq!(led, HealthLed::Red);
+    }
+
+    #[test]
+    fn app_event_can_carry_positions_update() {
+        // Compile-only sanity: the variant exists and accepts a Positions.
+        use crate::positions::Positions;
+        let p = Positions { items: vec![], fetched_at: ts(1_700_000_000) };
+        let _ev = AppEvent::PositionsUpdate(p);
     }
 }
