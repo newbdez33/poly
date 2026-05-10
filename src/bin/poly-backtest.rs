@@ -1,13 +1,18 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use poly_tui::backtest::{
-    config::{filter_strategies, strategy_set, BacktestArgs},
-    data::{cache::DiskCache, loader::DataLoader},
-    oracle::{estimate_sigma, BlackScholesOracle, NoisyBlackScholesOracle, TokenPriceOracle},
+    config::{filter_strategies, strategy_set, BacktestArgs, OracleKind},
+    data::{
+        cache::DiskCache,
+        loader::DataLoader,
+        trades::{CachedTradeStore, PolymarketTradeFetcher, Trade, TradeFetcher},
+    },
+    oracle::{estimate_sigma, BlackScholesOracle, NoisyBlackScholesOracle, RealTradeOracle, TokenPriceOracle},
     report::{render_html, ReportMeta},
     runner::run_strategy,
     stats::compute_stats,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -25,7 +30,7 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| DiskCache::default_root(""));
     println!("[poly-backtest] cache root: {}", cache_root.display());
 
-    let loader = DataLoader::new(cache_root)?;
+    let loader = DataLoader::new(cache_root.clone())?;
     println!("[poly-backtest] loading data {} -> {}...", args.start, args.end);
     let loaded = loader.load(args.start, args.end).await
         .context("loading data")?;
@@ -35,19 +40,64 @@ async fn main() -> Result<()> {
     let sigma = args.sigma.unwrap_or_else(|| estimate_sigma(&loaded.btc));
     println!("[poly-backtest] sigma = ${:.2} (friction {:.2}%)", sigma, args.friction * 100.0);
     let btc_arc = Arc::new(loaded.btc);
-    let base_oracle = BlackScholesOracle::new(btc_arc.clone(), sigma, args.friction);
-    let oracle: Box<dyn TokenPriceOracle> = if args.oracle_noise > 0.0 {
-        eprintln!(
-            "[poly-backtest] oracle noise σ={:.4} seed={}",
-            args.oracle_noise, args.noise_seed
-        );
-        Box::new(NoisyBlackScholesOracle::new(
-            base_oracle,
-            args.oracle_noise,
-            args.noise_seed,
-        ))
-    } else {
-        Box::new(base_oracle)
+    let oracle: Box<dyn TokenPriceOracle> = match args.oracle {
+        OracleKind::Bs => Box::new(BlackScholesOracle::new(btc_arc.clone(), sigma, args.friction)),
+        OracleKind::Noisy => {
+            eprintln!(
+                "[poly-backtest] oracle noise σ={:.4} seed={}",
+                args.oracle_noise, args.noise_seed
+            );
+            Box::new(NoisyBlackScholesOracle::new(
+                BlackScholesOracle::new(btc_arc.clone(), sigma, args.friction),
+                args.oracle_noise,
+                args.noise_seed,
+            ))
+        }
+        OracleKind::Real => {
+            eprintln!(
+                "[poly-backtest] loading real trade history (auto-fetching uncached)..."
+            );
+            let trades_dir = cache_root.join("trades");
+            let store = CachedTradeStore::new(trades_dir)?;
+            let fetcher = PolymarketTradeFetcher::new(100); // 100ms throttle
+            let mut all_trades: HashMap<i64, Vec<Trade>> = HashMap::new();
+            let mut fetched = 0usize;
+            let mut cached = 0usize;
+            let mut skipped = 0usize;
+            for (i, w) in loaded.windows.iter().enumerate() {
+                let cid = match &w.condition_id {
+                    Some(c) => c.clone(),
+                    None => {
+                        skipped += 1;
+                        continue;
+                    }
+                };
+                let trades = match store.load(w.window_ts) {
+                    Some(t) => { cached += 1; t }
+                    None => {
+                        let t = fetcher.fetch_window(&cid, w.window_ts).await
+                            .with_context(|| format!(
+                                "fetching trades for window {} ({})", w.window_ts, cid
+                            ))?;
+                        store.save(w.window_ts, &t)?;
+                        fetched += 1;
+                        if (cached + fetched) % 50 == 0 {
+                            eprintln!(
+                                "[poly-backtest]   trades: {} cached, {} fetched, {}/{} windows",
+                                cached, fetched, i + 1, loaded.windows.len()
+                            );
+                        }
+                        t
+                    }
+                };
+                all_trades.insert(w.window_ts, trades);
+            }
+            eprintln!(
+                "[poly-backtest] trades load complete: {} cached, {} fetched, {} skipped (no condition_id)",
+                cached, fetched, skipped
+            );
+            Box::new(RealTradeOracle::new(all_trades))
+        }
     };
 
     let all = strategy_set();
