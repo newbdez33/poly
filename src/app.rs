@@ -147,9 +147,11 @@ pub async fn run<B: Backend>(
     cmd_tx: mpsc::Sender<Cmd>,
     mut events: mpsc::Receiver<AppEvent>,
     refresh_interval: Duration,
+    window_minutes_tx: Option<mpsc::Sender<u32>>,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
     let mut state = AppState::new(refresh_interval);
+    state.window_minutes_tx = window_minutes_tx;
     let mut render_ticker = tokio::time::interval(Duration::from_millis(250));
 
     loop {

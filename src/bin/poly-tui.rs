@@ -173,8 +173,10 @@ async fn main() -> anyhow::Result<()> {
 
     let event_tx_market = event_tx.clone();
     let shutdown_market = shutdown.clone();
-    // Channel for app → market_watch window_minutes updates (wired in Task 11).
-    let (_window_minutes_tx, window_minutes_rx) = mpsc::channel::<u32>(8);
+    // Channel for app → market_watch window_minutes updates. App detects
+    // changes from the trader's event stream and pushes here; market_watch
+    // picks up and re-floors its gamma window.
+    let (window_minutes_tx, window_minutes_rx) = mpsc::channel::<u32>(8);
     let h_market = match (price_feed, market_for_watch) {
         (Some(feed), Some(market)) => {
             tokio::spawn(market_watch::run(feed, market, event_tx_market, window_minutes_rx, shutdown_market))
@@ -214,6 +216,7 @@ async fn main() -> anyhow::Result<()> {
         cmd_tx,
         event_rx,
         Duration::from_secs(cfg.refresh_interval_secs),
+        Some(window_minutes_tx),
         shutdown.clone(),
     ).await;
 
