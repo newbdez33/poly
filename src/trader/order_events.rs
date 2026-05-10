@@ -1,9 +1,90 @@
 use crate::trader::errors::StreamError;
 use crate::trader::executor::OrderId;
 use async_trait::async_trait;
+use polymarket_client_sdk_v2::auth::Normal;
+use polymarket_client_sdk_v2::auth::state::Authenticated;
+use polymarket_client_sdk_v2::clob::Client as ClobClient;
+use polymarket_client_sdk_v2::clob::types::OrderStatusType;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
+
+/// Polls SDK `client.order(id)` every 2s until the order reaches a terminal
+/// state (Matched/Canceled). Emits `OrderEvent::Filled` on each tick where
+/// `size_matched` increased; `partial` flag is implicit (compare to total).
+pub struct PolymarketPollOrderEvents {
+    client: Arc<ClobClient<Authenticated<Normal>>>,
+}
+
+impl PolymarketPollOrderEvents {
+    pub fn new(client: Arc<ClobClient<Authenticated<Normal>>>) -> Self {
+        Self { client }
+    }
+}
+
+#[async_trait]
+impl OrderEventStream for PolymarketPollOrderEvents {
+    async fn watch(&self, id: OrderId) -> Result<mpsc::Receiver<OrderEvent>, StreamError> {
+        let (tx, rx) = mpsc::channel(8);
+        let client = self.client.clone();
+        let id_owned = id.clone();
+        tokio::spawn(async move {
+            let mut last_matched = Decimal::ZERO;
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let resp = match client.order(&id_owned.0).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        // Order not found = filled or cancelled. Without further
+                        // info we emit Cancelled; caller distinguishes by
+                        // checking position state. Acceptable for v1.7.
+                        tracing::debug!("order({}) poll error: {e}", id_owned.0);
+                        let _ = tx.send(OrderEvent::Cancelled { id: id_owned.clone() }).await;
+                        return;
+                    }
+                };
+
+                let total = resp.original_size;
+                let matched = resp.size_matched;
+
+                if matched > last_matched {
+                    last_matched = matched;
+                    let _ = tx.send(OrderEvent::Filled {
+                        id: id_owned.clone(),
+                        fill_price: resp.price,
+                        shares_filled: matched,
+                        total_shares: total,
+                    }).await;
+                    // continue regardless — partial fills may turn into full
+                }
+
+                match resp.status {
+                    OrderStatusType::Matched => {
+                        // Fully filled; ensure caller sees the final fill event.
+                        return;
+                    }
+                    OrderStatusType::Canceled => {
+                        let _ = tx.send(OrderEvent::Cancelled { id: id_owned.clone() }).await;
+                        return;
+                    }
+                    OrderStatusType::Live | OrderStatusType::Delayed | OrderStatusType::Unmatched => {
+                        // Keep polling.
+                    }
+                    _ => {
+                        let _ = tx.send(OrderEvent::Rejected {
+                            id: id_owned.clone(),
+                            reason: format!("unexpected status {:?}", resp.status),
+                        }).await;
+                        return;
+                    }
+                }
+            }
+        });
+        Ok(rx)
+    }
+}
 
 /// One event in the lifecycle of a single order. Emitted by `OrderEventStream`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,5 +185,15 @@ pub mod tests {
             Err(_) => {}          // timeout
             Ok(Some(_)) => panic!("expected no events"),
         }
+    }
+
+    // Smoke only — real polling against CLOB requires authenticated client.
+    // Exercised end-to-end in tests/maker_integration.rs.
+    #[test]
+    fn polymarket_poll_order_events_constructs() {
+        // Just verify the type exists with the expected name.
+        // We can't construct without a real authenticated SDK Client.
+        fn _assert_sized<T: Sized>() {}
+        _assert_sized::<super::PolymarketPollOrderEvents>();
     }
 }
