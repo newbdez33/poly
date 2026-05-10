@@ -4,11 +4,16 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use poly_tui::{
+    adapters::polymarket_positions_wrapper::PolymarketPositionsFetcher,
+    adapters::redis_positions_wrapper::RedisPositionsCache,
     app, cache::{BalanceCache, RedisBalanceCache},
     clob::{BalanceFetcher, ClobBalanceFetcher},
     config::Config,
     domain::{AppEvent, RefreshStatus},
-    input, refresher::{self, Cmd},
+    input,
+    positions::{PositionsCache, PositionsFetcher},
+    positioner,
+    refresher::{self, Cmd},
     trader::adapters::redis_stream_wrapper::RedisTraderStream,
     trader::adapters::chainlink_btc_wrapper::HttpChainlinkFeed,
     trader::adapters::gamma_wrapper::GammaMarketDiscovery,
@@ -16,6 +21,9 @@ use poly_tui::{
     tui::events::TraderEventStream,
     tui::market_watch::{self, BtcPriceFeed},
 };
+use alloy::signers::local::LocalSigner;
+use polymarket_client_sdk_v2::{derive_proxy_wallet, POLYGON};
+use std::str::FromStr;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::{io, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
@@ -52,6 +60,23 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(AlwaysFails)
         }
     };
+
+    // Derive proxy address from EOA private key for positions API.
+    let positions_user = match derive_user_address(&cfg.polymarket_private_key) {
+        Ok(addr) => Some(addr),
+        Err(e) => {
+            tracing::warn!("proxy address derivation failed: {e} — positions hidden");
+            None
+        }
+    };
+
+    let positions_fetcher: Option<Arc<dyn PositionsFetcher>> = positions_user
+        .map(|addr| Arc::new(PolymarketPositionsFetcher::new(addr)) as Arc<dyn PositionsFetcher>);
+
+    let positions_cache: Arc<dyn PositionsCache> = Arc::new(
+        RedisPositionsCache::connect(&cfg.redis_url).await
+            .context("connecting Redis for positions cache")?,
+    );
 
     let trader_stream: Option<Arc<dyn TraderEventStream>> =
         match RedisTraderStream::connect(&cfg.redis_url).await {
@@ -155,6 +180,20 @@ async fn main() -> anyhow::Result<()> {
         _ => tokio::spawn(async move {}),
     };
 
+    let event_tx_pos = event_tx.clone();
+    let shutdown_pos = shutdown.clone();
+    let h_positions = if let Some(fetcher) = positions_fetcher {
+        tokio::spawn(positioner::run(
+            fetcher,
+            positions_cache.clone(),
+            event_tx_pos,
+            Duration::from_secs(cfg.refresh_interval_secs),
+            shutdown_pos,
+        ))
+    } else {
+        tokio::spawn(async move {})
+    };
+
     // Set up terminal
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
@@ -179,7 +218,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Cleanup
     shutdown.cancel();
-    let _ = tokio::join!(h_refresh, h_input, h_status, h_trader, h_market);
+    let _ = tokio::join!(h_refresh, h_input, h_status, h_trader, h_market, h_positions);
 
     app_result
 }
@@ -192,4 +231,16 @@ impl BalanceFetcher for AlwaysFails {
     async fn fetch(&self) -> Result<poly_tui::domain::Balance, poly_tui::domain::FetchError> {
         Err(poly_tui::domain::FetchError::Auth)
     }
+}
+
+/// Derive the user's positions-API address from the EOA private key.
+/// For Polymarket Magic/email accounts, this is the proxy contract address;
+/// for browser-wallet accounts, this is a Gnosis Safe address. We default to
+/// proxy because that's what existing trader code assumes (SignatureType::Proxy).
+fn derive_user_address(private_key: &str) -> anyhow::Result<alloy::primitives::Address> {
+    let signer = LocalSigner::from_str(private_key)
+        .map_err(|e| anyhow::anyhow!("invalid private key: {e}"))?;
+    let eoa = signer.address();
+    derive_proxy_wallet(eoa, POLYGON)
+        .ok_or_else(|| anyhow::anyhow!("derive_proxy_wallet returned None for chain {POLYGON}"))
 }
