@@ -55,45 +55,77 @@ async fn main() -> Result<()> {
         }
         OracleKind::Real => {
             eprintln!(
-                "[poly-backtest] loading real trade history (auto-fetching uncached)..."
+                "[poly-backtest] loading real trade history (auto-fetching uncached, parallel=10)..."
             );
             let trades_dir = cache_root.join("trades");
-            let store = CachedTradeStore::new(trades_dir)?;
-            let fetcher = PolymarketTradeFetcher::new(100); // 100ms throttle
+            let store = std::sync::Arc::new(CachedTradeStore::new(trades_dir)?);
+            let fetcher = std::sync::Arc::new(PolymarketTradeFetcher::new(0)); // throttle handled by concurrency cap
             let mut all_trades: HashMap<i64, Vec<Trade>> = HashMap::new();
-            let mut fetched = 0usize;
             let mut cached = 0usize;
             let mut skipped = 0usize;
-            for (i, w) in loaded.windows.iter().enumerate() {
+            let total = loaded.windows.len();
+
+            use futures::stream::{StreamExt, FuturesUnordered};
+
+            let mut to_fetch: Vec<(i64, String)> = Vec::new();
+            for w in loaded.windows.iter() {
                 let cid = match &w.condition_id {
                     Some(c) => c.clone(),
-                    None => {
-                        skipped += 1;
-                        continue;
-                    }
+                    None => { skipped += 1; continue; }
                 };
-                let trades = match store.load(w.window_ts) {
-                    Some(t) => { cached += 1; t }
-                    None => {
-                        let t = fetcher.fetch_window(&cid, w.window_ts).await
-                            .with_context(|| format!(
-                                "fetching trades for window {} ({})", w.window_ts, cid
-                            ))?;
-                        store.save(w.window_ts, &t)?;
-                        fetched += 1;
-                        if (cached + fetched) % 50 == 0 {
-                            eprintln!(
-                                "[poly-backtest]   trades: {} cached, {} fetched, {}/{} windows",
-                                cached, fetched, i + 1, loaded.windows.len()
-                            );
-                        }
-                        t
-                    }
-                };
-                all_trades.insert(w.window_ts, trades);
+                if let Some(t) = store.load(w.window_ts) {
+                    cached += 1;
+                    all_trades.insert(w.window_ts, t);
+                } else {
+                    to_fetch.push((w.window_ts, cid));
+                }
             }
             eprintln!(
-                "[poly-backtest] trades load complete: {} cached, {} fetched, {} skipped (no condition_id)",
+                "[poly-backtest] trades: {} cached, {} to fetch, {} skipped (no condition_id)",
+                cached, to_fetch.len(), skipped
+            );
+
+            let mut pending = FuturesUnordered::new();
+            let mut iter = to_fetch.into_iter();
+            const PARALLEL: usize = 10;
+            for _ in 0..PARALLEL {
+                if let Some((ts, cid)) = iter.next() {
+                    let f = fetcher.clone();
+                    let s = store.clone();
+                    pending.push(tokio::spawn(async move {
+                        let t = f.fetch_window(&cid, ts).await
+                            .with_context(|| format!("fetching trades for window {} ({})", ts, cid))?;
+                        s.save(ts, &t)?;
+                        anyhow::Ok((ts, t))
+                    }));
+                }
+            }
+
+            let mut fetched = 0usize;
+            while let Some(joined) = pending.next().await {
+                let (ts, trades) = joined??;
+                all_trades.insert(ts, trades);
+                fetched += 1;
+                if fetched % 50 == 0 {
+                    eprintln!(
+                        "[poly-backtest]   trades: {} fetched ({}/{} total windows)",
+                        fetched, cached + fetched, total - skipped
+                    );
+                }
+                if let Some((ts, cid)) = iter.next() {
+                    let f = fetcher.clone();
+                    let s = store.clone();
+                    pending.push(tokio::spawn(async move {
+                        let t = f.fetch_window(&cid, ts).await
+                            .with_context(|| format!("fetching trades for window {} ({})", ts, cid))?;
+                        s.save(ts, &t)?;
+                        anyhow::Ok((ts, t))
+                    }));
+                }
+            }
+
+            eprintln!(
+                "[poly-backtest] trades load complete: {} cached, {} fetched, {} skipped",
                 cached, fetched, skipped
             );
             Box::new(RealTradeOracle::new(all_trades))
