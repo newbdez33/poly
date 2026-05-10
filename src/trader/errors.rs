@@ -48,6 +48,8 @@ pub enum ExecError {
     Decode(String),
     #[error("insufficient USDC")]
     InsufficientFunds,
+    #[error("operation not supported by this executor")]
+    NotSupported,
 }
 
 #[derive(Error, Debug)]
@@ -76,5 +78,11 @@ mod tests {
         assert_eq!(format!("{e}"), "gamma price fetch failed: 502");
         let d = PriceError::Decode("missing field".into());
         assert_eq!(format!("{d}"), "price response decode failed: missing field");
+    }
+
+    #[test]
+    fn exec_error_not_supported_displays() {
+        let e = ExecError::NotSupported;
+        assert_eq!(format!("{e}"), "operation not supported by this executor");
     }
 }

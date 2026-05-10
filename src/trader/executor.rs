@@ -11,6 +11,16 @@ pub struct FillResult {
     pub dollars: Decimal,
 }
 
+/// Opaque CLOB order identifier returned by `place_limit`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct OrderId(pub String);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrderSide {
+    Buy,
+    Sell,
+}
+
 #[async_trait]
 pub trait OrderExecutor: Send + Sync {
     async fn buy_fok(&self, token_id: &str, dollars: Decimal) -> Result<FillResult, ExecError>;
@@ -101,5 +111,21 @@ mod tests {
         };
         let back: FillResult = serde_json::from_str(&serde_json::to_string(&f).unwrap()).unwrap();
         assert_eq!(f, back);
+    }
+
+    #[test]
+    fn order_id_serde_roundtrip() {
+        let id = OrderId("abc-123".into());
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OrderId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn order_side_serializes_distinctly() {
+        assert_ne!(
+            serde_json::to_string(&OrderSide::Buy).unwrap(),
+            serde_json::to_string(&OrderSide::Sell).unwrap(),
+        );
     }
 }
