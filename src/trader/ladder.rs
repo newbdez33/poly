@@ -43,7 +43,13 @@ pub struct LadderState {
     pub windows_lost: u32,
     pub windows_skipped: u32,
     pub stopped: Option<StopReason>,
+    /// Trading window length in minutes. {5, 15, 60}. Pre-v1.7.1 ladder JSON
+    /// omits this field; serde(default) restores 5min behavior on legacy state.
+    #[serde(default = "default_window_minutes")]
+    pub window_minutes: u32,
 }
+
+fn default_window_minutes() -> u32 { 5 }
 
 impl LadderState {
     pub fn new(direction: Direction, base_usd: Decimal, max_step: u8, now: DateTime<Utc>) -> Self {
@@ -55,7 +61,14 @@ impl LadderState {
             realized_pnl_usd: Decimal::ZERO,
             windows_won: 0, windows_lost: 0, windows_skipped: 0,
             stopped: None,
+            window_minutes: 5,
         }
+    }
+
+    /// Builder-style override for `window_minutes`. Use after `new()`.
+    pub fn with_window_minutes(mut self, mins: u32) -> Self {
+        self.window_minutes = mins;
+        self
     }
 
     pub fn current_bet_usd(&self) -> Decimal {
@@ -115,6 +128,7 @@ mod tests {
             realized_pnl_usd: Decimal::ZERO,
             windows_won: 0, windows_lost: 0, windows_skipped: 0,
             stopped: None,
+            window_minutes: 5,
         }
     }
 
@@ -223,5 +237,47 @@ mod tests {
                 assert!(next.current_step >= 1 && next.current_step <= next.max_step);
             }
         }
+    }
+
+    #[test]
+    fn ladder_default_window_minutes_is_5() {
+        let s = LadderState::new(Direction::Up, Decimal::from(5), 5, ts());
+        assert_eq!(s.window_minutes, 5);
+    }
+
+    #[test]
+    fn ladder_with_window_minutes_builder() {
+        let s = LadderState::new(Direction::Up, Decimal::from(5), 5, ts())
+            .with_window_minutes(15);
+        assert_eq!(s.window_minutes, 15);
+    }
+
+    #[test]
+    fn ladder_serde_roundtrip_includes_window_minutes() {
+        let s = LadderState::new(Direction::Up, Decimal::from(5), 5, ts())
+            .with_window_minutes(15);
+        let json = serde_json::to_string(&s).unwrap();
+        let back: LadderState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.window_minutes, 15);
+    }
+
+    #[test]
+    fn ladder_legacy_json_without_window_minutes_defaults_to_5() {
+        // Pre-v1.7.1 ladder JSON has no window_minutes field.
+        let legacy = r#"{
+            "session_id": "00000000-0000-0000-0000-000000000000",
+            "direction": "up",
+            "base_usd": "5",
+            "max_step": 5,
+            "current_step": 1,
+            "session_started_at": "2026-05-10T00:00:00Z",
+            "realized_pnl_usd": "0",
+            "windows_won": 0,
+            "windows_lost": 0,
+            "windows_skipped": 0,
+            "stopped": null
+        }"#;
+        let s: LadderState = serde_json::from_str(legacy).unwrap();
+        assert_eq!(s.window_minutes, 5);
     }
 }
