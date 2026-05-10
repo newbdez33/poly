@@ -160,6 +160,41 @@ Live position display in the TUI balance box, sourced from `data-api.polymarket.
 
 ---
 
+## v1.8 — poly-redeem CLI ✅ COMPLETE (功能齐全，使用前需小额 MATIC)
+
+`poly-redeem` 二进制：把卡住的胜方 outcome tokens 兑换回 USDC.e。Sell 失败导致股票卡住的安全网。
+
+```bash
+poly-redeem --dry-run    # 列出可兑换的仓位
+poly-redeem              # 真的兑换（需要 EOA 有 MATIC 付 gas）
+```
+
+### Usage
+
+- 自动从 `POLYMARKET_PRIVATE_KEY` 派生 EOA + proxy
+- 拉 data-api 仓位列表，过滤 `redeemable=true`
+- 按 condition_id 去重（一个 binary 市场 UP+DOWN 一笔交易搞定）
+- 每个市场调一次 `CTF.redeemPositions()`
+
+### ⚠️ Gas 要求
+
+Polymarket Magic/邮箱账户的 EOA 默认 **0 MATIC**——CLOB 交易走 Polymarket 中继服务器免 gas，但 CTF 直接合约调用必须 EOA 自付。
+
+首次使用前：
+
+1. 桥 / 买 ~$1 MATIC → 转到 EOA 地址（启动时打印）
+2. 一次性投入，之后约 25 次兑换够用（每次 ~$0.04 gas）
+
+或者去 polymarket.com UI 手动 redeem（用 Magic 的中继器，不要 gas）。
+
+### 何时会用到
+
+- Sell 失败 → 股票卡住 → 市场结算后 → `poly-redeem` 取回
+- 重启 trader 之前先跑一次清账
+- 旧账户有遗留仓位时清理
+
+---
+
 ## v1.7 — Limit-order maker mode (待 24h 真钱数据后决定)
 
 **触发条件：** 24 小时真钱跑完，确认 backtest 模型在实盘成立后再启动。

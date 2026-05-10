@@ -16,7 +16,7 @@ crossterm = "0.28"
 # polymarket-client-sdk-v2 is published as polymarket_client_sdk_v2 on crates.io
 # NOTE: polymarket_client_sdk_v2 pulls in alloy 1.6.x; alloy = "0.8" conflicts via c-kzg native link.
 # We match the transitive alloy version to avoid duplicate native lib conflict.
-polymarket_client_sdk_v2 = { version = "0.6.0-canary.1", features = ["clob", "data"] }
+polymarket_client_sdk_v2 = { version = "0.6.0-canary.1", features = ["clob", "data", "ctf"] }
 alloy = { version = "1", features = ["signer-local", "providers", "contract", "transport-http", "network"] }
 
 fred = { version = "9", features = ["enable-rustls"] }
@@ -99,6 +99,10 @@ path = "tests/chainlink_integration.rs"
 [[bin]]
 name = "poly-backtest"
 path = "src/bin/poly-backtest.rs"
+
+[[bin]]
+name = "poly-redeem"
+path = "src/bin/poly-redeem.rs"
 
 [[test]]
 name = "backtest_smoke"
