@@ -1,5 +1,6 @@
 use crate::app::TraderHealth;
 use crate::domain::{Balance, HealthLed, RefreshStatus};
+use crate::positions::Positions;
 use crate::trader::event::TraderEvent;
 use crate::tui::market_watch::MarketState;
 use chrono::{DateTime, Utc};
@@ -24,6 +25,7 @@ pub struct UiState {
     pub trader_latest: Option<TraderEvent>,
     pub trader_health: TraderHealth,
     pub market: Option<MarketState>,
+    pub positions: Option<Positions>,
 }
 
 pub fn render(frame: &mut Frame, state: &UiState) {
@@ -47,15 +49,73 @@ pub fn render(frame: &mut Frame, state: &UiState) {
 }
 
 fn render_balance(frame: &mut Frame, area: Rect, state: &UiState) {
-    let balance_text = match &state.balance {
-        Some(b) => format!("USDC: ${}", format_decimal(b.usdc)),
-        None => "USDC: --".to_string(),
+    let usdc_line = match &state.balance {
+        Some(b) => Line::from(format!("USDC: ${}", format_decimal(b.usdc)))
+            .alignment(Alignment::Center),
+        None => Line::from("USDC: --").alignment(Alignment::Center),
     };
-    let balance = Paragraph::new(balance_text)
-        .alignment(Alignment::Center)
+
+    let positions_line = positions_line(state);
+
+    let balance = Paragraph::new(vec![usdc_line, positions_line])
         .style(Style::default().add_modifier(Modifier::BOLD))
         .block(Block::default().borders(Borders::ALL).title("poly-tui"));
     frame.render_widget(balance, area);
+}
+
+/// Build the second line of the balance box.
+///
+/// States:
+/// - positions = None  -> "Loading positions..." (dim)
+/// - positions = Some(empty) -> "No open positions" (dim)
+/// - positions = Some(items) -> one line per item: "Holding: 10 UP @ $0.500  now $4.85 (-3%)"
+///
+/// When multiple positions, only the first is shown on this line; further
+/// positions overflow into additional lines (handled by the multi-line
+/// Paragraph in render_balance — extend balance area Constraint::Length if
+/// strategy 4 ever produces >1 simultaneous position).
+fn positions_line(state: &UiState) -> Line<'static> {
+    use rust_decimal::prelude::ToPrimitive;
+    let p = match &state.positions {
+        None => return Line::from(Span::styled(
+            "Loading positions\u{2026}",
+            Style::default().fg(Color::DarkGray),
+        )).alignment(Alignment::Center),
+        Some(p) if p.items.is_empty() => return Line::from(Span::styled(
+            "No open positions",
+            Style::default().fg(Color::DarkGray),
+        )).alignment(Alignment::Center),
+        Some(p) => p,
+    };
+    // Render the first position. (Multi-position rendering deferred — strategy
+    // 4 never holds more than one. Spec calls out this case but defers full
+    // multi-position layout to v1.7+.)
+    let first = &p.items[0];
+    let side = match first.side {
+        crate::positions::Side::Up => "UP",
+        crate::positions::Side::Down => "DOWN",
+    };
+    let pct = first.pnl_pct();
+    let pct_int: i64 = pct.round().to_i64().unwrap_or(0);
+    let (sign, color) = if pct_int > 0 {
+        ("+", Color::Green)
+    } else if pct_int < 0 {
+        ("", Color::Red)
+    } else {
+        ("\u{00b1}", Color::White)
+    };
+    let pct_str = format!("{sign}{pct_int}%");
+    let cost_str = format!("${:.3}", first.avg_price.to_f64().unwrap_or(0.0));
+    let value_str = format!("${:.2}", first.value_usd().to_f64().unwrap_or(0.0));
+
+    let spans = vec![
+        Span::raw(format!(
+            "Holding: {} {} @ {}  now {} ",
+            first.shares, side, cost_str, value_str,
+        )),
+        Span::styled(format!("({pct_str})"), Style::default().fg(color)),
+    ];
+    Line::from(spans).alignment(Alignment::Center)
 }
 
 fn render_trader_subtitle(frame: &mut Frame, area: Rect, state: &UiState) {
@@ -366,6 +426,7 @@ mod tests {
             trader_latest: latest,
             trader_health: health,
             market: None,
+            positions: None,
         }
     }
 
@@ -386,6 +447,7 @@ mod tests {
             trader_latest: None,
             trader_health: TraderHealth::NotStarted,
             market,
+            positions: None,
         }
     }
 
@@ -482,6 +544,7 @@ mod tests {
             trader_latest: None,
             trader_health: TraderHealth::NotStarted,
             market: None,
+            positions: None,
         };
         let out = render_to_buffer(&state);
         insta::assert_snapshot!("ui_with_balance", out);
@@ -500,6 +563,7 @@ mod tests {
             trader_latest: None,
             trader_health: TraderHealth::NotStarted,
             market: None,
+            positions: None,
         };
         let out = render_to_buffer(&state);
         insta::assert_snapshot!("ui_no_balance", out);
@@ -524,6 +588,7 @@ mod tests {
             trader_latest: None,
             trader_health: TraderHealth::NotStarted,
             market: None,
+            positions: None,
         };
         let out = render_to_buffer(&state);
         insta::assert_snapshot!("ui_failure", out);
@@ -601,5 +666,92 @@ mod tests {
             events,
         );
         insta::assert_snapshot!("trader_long_log", render_to_buffer(&state));
+    }
+
+    fn ui_state_with_positions(positions: Option<crate::positions::Positions>) -> UiState {
+        let now = fixed_now();
+        UiState {
+            balance: Some(Balance {
+                usdc: Decimal::from_str("173.69").unwrap(),
+                fetched_at: now,
+            }),
+            last_refresh: None,
+            clob_health: HealthLed::Green,
+            redis_health: HealthLed::Green,
+            refresh_interval: Duration::from_secs(30),
+            now,
+            trader_log: vec![],
+            trader_latest: None,
+            trader_health: TraderHealth::NotStarted,
+            market: None,
+            positions,
+        }
+    }
+
+    fn pos_fixture(slug: &str, shares: &str, avg: &str, cur: &str) -> crate::positions::Position {
+        use rust_decimal::Decimal;
+        crate::positions::Position {
+            token_id: "tok-1".into(),
+            side: crate::positions::Side::Up,
+            market_slug: slug.into(),
+            shares: Decimal::from_str(shares).unwrap(),
+            avg_price: Decimal::from_str(avg).unwrap(),
+            current_price: Decimal::from_str(cur).unwrap(),
+        }
+    }
+
+    #[test]
+    fn renders_balance_no_positions() {
+        let s = ui_state_with_positions(None);
+        insta::assert_snapshot!("balance_no_positions", render_to_buffer(&s));
+    }
+
+    #[test]
+    fn renders_balance_loading_positions() {
+        // Cold-start: positions = None means "loading"
+        // Distinguished from "no open positions" (positions = Some(empty))
+        let s = ui_state_with_positions(None);
+        let buf = render_to_buffer(&s);
+        assert!(buf.contains("Loading"), "buf:\n{buf}");
+    }
+
+    #[test]
+    fn renders_balance_no_open_positions() {
+        let s = ui_state_with_positions(Some(crate::positions::Positions {
+            items: vec![],
+            fetched_at: fixed_now(),
+        }));
+        let buf = render_to_buffer(&s);
+        assert!(buf.contains("No open"), "buf:\n{buf}");
+    }
+
+    #[test]
+    fn renders_balance_with_one_losing_position() {
+        let s = ui_state_with_positions(Some(crate::positions::Positions {
+            items: vec![pos_fixture("btc-updown-5m-1", "10", "0.50", "0.485")],
+            fetched_at: fixed_now(),
+        }));
+        insta::assert_snapshot!("balance_one_losing", render_to_buffer(&s));
+    }
+
+    #[test]
+    fn renders_balance_with_one_winning_position() {
+        let s = ui_state_with_positions(Some(crate::positions::Positions {
+            items: vec![pos_fixture("btc-updown-5m-1", "10", "0.50", "0.85")],
+            fetched_at: fixed_now(),
+        }));
+        insta::assert_snapshot!("balance_one_winning", render_to_buffer(&s));
+    }
+
+    #[test]
+    fn renders_balance_with_two_positions() {
+        let s = ui_state_with_positions(Some(crate::positions::Positions {
+            items: vec![
+                pos_fixture("btc-updown-5m-1", "10", "0.50", "0.485"),
+                pos_fixture("btc-updown-5m-2", "20", "0.48", "0.52"),
+            ],
+            fetched_at: fixed_now(),
+        }));
+        insta::assert_snapshot!("balance_two_positions", render_to_buffer(&s));
     }
 }

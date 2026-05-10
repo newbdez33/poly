@@ -1,16 +1,16 @@
 ---
 source: src/ui.rs
-expression: render_to_buffer(&state)
+expression: render_to_buffer(&s)
 ---
 ┌poly-tui──────────────────────────────────────────────────┐
-│                       USDC: $100.00                      │
+│                       USDC: $173.69                      │
 │                    Loading positions…                    │
 │                                                          │
 └──────────────────────────────────────────────────────────┘
  BTC: --                                                    
- Trader  UP  ladder=1  P&L: $0                              
-22:15:20  SessionStarted                                    
-22:15:20  SessionStarted                                    
-22:15:20  SessionStarted                                    
+ Trader  not started — run `poly-trader`                    
+                                                            
+                                                            
+                                                            
                                                             
 ● CLOB  ● Redis  ● Trader  refresh: 30s  last: --    q quit

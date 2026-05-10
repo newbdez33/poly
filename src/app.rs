@@ -1,5 +1,6 @@
 use crate::cache::BalanceCache;
 use crate::domain::{AppEvent, Balance, HealthLed, RefreshStatus};
+use crate::positions::Positions;
 use crate::refresher::Cmd;
 use crate::trader::event::TraderEvent;
 use crate::tui::market_watch::MarketState;
@@ -33,6 +34,7 @@ pub struct AppState {
     pub trader_latest: Option<TraderEvent>,
     pub trader_health: TraderHealth,
     pub market: Option<MarketState>,
+    pub positions: Option<Positions>,
 }
 
 impl AppState {
@@ -47,6 +49,7 @@ impl AppState {
             trader_latest: None,
             trader_health: TraderHealth::NotStarted,
             market: None,
+            positions: None,
         }
     }
 
@@ -64,6 +67,7 @@ impl AppState {
             trader_latest: self.trader_latest.clone(),
             trader_health: self.trader_health,
             market: self.market.clone(),
+            positions: self.positions.clone(),
         }
     }
 }
@@ -89,8 +93,8 @@ pub fn handle_event(state: &mut AppState, ev: AppEvent, cmd_tx: &mpsc::Sender<Cm
         AppEvent::MarketUpdate(s) => {
             state.market = Some(s);
         }
-        AppEvent::PositionsUpdate(_) => {
-            // Wired in Task 6 — temporarily ignore to keep the match exhaustive.
+        AppEvent::PositionsUpdate(p) => {
+            state.positions = Some(p);
         }
     }
 }
@@ -379,5 +383,15 @@ mod tests {
         market.current_price = Some(Decimal::from(80000));
         handle_event(&mut s, AppEvent::MarketUpdate(market.clone()), &tx);
         assert_eq!(s.market.as_ref().unwrap().current_price, market.current_price);
+    }
+
+    #[tokio::test]
+    async fn handle_event_updates_positions_on_positions_update() {
+        use crate::positions::Positions;
+        let mut state = AppState::new(Duration::from_secs(30));
+        let (cmd_tx, _cmd_rx) = mpsc::channel(8);
+        let p = Positions { items: vec![], fetched_at: chrono::Utc::now() };
+        handle_event(&mut state, AppEvent::PositionsUpdate(p.clone()), &cmd_tx);
+        assert_eq!(state.positions, Some(p));
     }
 }
