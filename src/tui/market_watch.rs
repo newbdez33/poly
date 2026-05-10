@@ -107,6 +107,17 @@ pub async fn run(
                 if let Ok(p) = price_feed.latest_price().await {
                     state.current_price = Some(p);
                     state.last_rpc_ok_at = Some(chrono::Utc::now());
+                    // Window-open snapshot: gamma's `priceToBeat` is only added
+                    // after a window CLOSES, so for live windows we have to
+                    // freeze the Chainlink price at the boundary as the strike.
+                    // This matches Polymarket's actual resolution mechanic
+                    // (BTC at open vs close).
+                    let now_ts = chrono::Utc::now().timestamp();
+                    let current_window = floor_5min(now_ts);
+                    if state.window_ts != Some(current_window) {
+                        state.window_ts = Some(current_window);
+                        state.price_to_beat = Some(p);
+                    }
                 }
                 emit(&event_tx, &state).await;
             }
@@ -114,13 +125,15 @@ pub async fn run(
             _ = gamma_ticker.tick() => {
                 let now_ts = chrono::Utc::now().timestamp();
                 let current_window = floor_5min(now_ts);
-                if state.window_ts != Some(current_window) {
-                    if let Ok(m) = market.find_window(current_window).await {
-                        state.window_ts = Some(current_window);
-                        state.price_to_beat = m.price_to_beat;
-                        state.last_gamma_ok_at = Some(chrono::Utc::now());
-                        emit(&event_tx, &state).await;
+                // Best-effort: if gamma DOES have an official priceToBeat
+                // (only true for windows that have already closed), prefer it
+                // over our local snapshot.
+                if let Ok(m) = market.find_window(current_window).await {
+                    if let Some(p) = m.price_to_beat {
+                        state.price_to_beat = Some(p);
                     }
+                    state.last_gamma_ok_at = Some(chrono::Utc::now());
+                    emit(&event_tx, &state).await;
                 }
             }
         }
@@ -372,6 +385,48 @@ mod tests {
         }
         let s = latest_state.expect("at least one MarketUpdate");
         assert_eq!(s.price_to_beat, Some(Decimal::from(80100)));
+
+        shutdown.cancel();
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn snapshots_chainlink_at_window_open_when_gamma_lacks_price_to_beat() {
+        // Gamma returns no priceToBeat (live un-resolved window) — the rpc tick
+        // must snapshot the chainlink price as the local price-to-beat.
+        tokio::time::pause();
+        let feed = FakePriceFeed::ok("80000");
+        let market = Arc::new(FakeMarket {
+            responses: Mutex::new(vec![Ok(WindowMarket {
+                window_ts: 0,
+                slug: "test".into(),
+                up_token_id: "u".into(),
+                down_token_id: "d".into(),
+                up_ask: Decimal::ZERO,
+                down_ask: Decimal::ZERO,
+                closed: false,
+                winner: None,
+                price_to_beat: None, // live window has no strike yet
+            })]),
+        });
+        let (tx, mut rx) = mpsc::channel::<AppEvent>(64);
+        let shutdown = CancellationToken::new();
+
+        let task = tokio::spawn(run(feed, market, tx, shutdown.clone()));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(6)).await;
+        tokio::task::yield_now().await;
+
+        let mut latest_state: Option<MarketState> = None;
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::MarketUpdate(s) = ev {
+                latest_state = Some(s);
+            }
+        }
+        let s = latest_state.expect("at least one MarketUpdate");
+        // Snapshot kicked in: price_to_beat == current_price after the boundary.
+        assert_eq!(s.price_to_beat, Some(Decimal::from(80000)));
+        assert_eq!(s.current_price, Some(Decimal::from(80000)));
 
         shutdown.cancel();
         let _ = task.await;
