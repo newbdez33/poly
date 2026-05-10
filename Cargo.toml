@@ -103,3 +103,7 @@ path = "src/bin/poly-backtest.rs"
 [[test]]
 name = "backtest_smoke"
 path = "tests/backtest_smoke.rs"
+
+[[test]]
+name = "positions_integration"
+path = "tests/positions_integration.rs"
