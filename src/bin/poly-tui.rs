@@ -173,11 +173,17 @@ async fn main() -> anyhow::Result<()> {
 
     let event_tx_market = event_tx.clone();
     let shutdown_market = shutdown.clone();
+    // Channel for app → market_watch window_minutes updates (wired in Task 11).
+    let (_window_minutes_tx, window_minutes_rx) = mpsc::channel::<u32>(8);
     let h_market = match (price_feed, market_for_watch) {
         (Some(feed), Some(market)) => {
-            tokio::spawn(market_watch::run(feed, market, event_tx_market, shutdown_market))
+            tokio::spawn(market_watch::run(feed, market, event_tx_market, window_minutes_rx, shutdown_market))
         }
-        _ => tokio::spawn(async move {}),
+        _ => {
+            // Drop the rx to avoid leaving an unfilled channel.
+            drop(window_minutes_rx);
+            tokio::spawn(async move {})
+        }
     };
 
     let event_tx_pos = event_tx.clone();

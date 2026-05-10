@@ -27,6 +27,9 @@ pub struct MarketState {
     pub current_price: Option<Decimal>,
     pub last_rpc_ok_at: Option<DateTime<Utc>>,
     pub last_gamma_ok_at: Option<DateTime<Utc>>,
+    /// Trading window length in minutes. {5, 15, 60}. Receives updates via
+    /// the mpsc channel from app::handle_event when a TraderEvent arrives.
+    pub window_minutes: u32,
 }
 
 impl MarketState {
@@ -37,6 +40,7 @@ impl MarketState {
             current_price: None,
             last_rpc_ok_at: None,
             last_gamma_ok_at: None,
+            window_minutes: 5,
         }
     }
 
@@ -64,25 +68,22 @@ impl MarketState {
         }
     }
 
-    /// Seconds remaining until the current 5-minute window closes.
-    /// Returns 300 when exactly at a boundary, counting down to 1 one second before.
-    pub fn seconds_to_next_boundary(&self, now_ts: i64) -> i64 {
-        let r = now_ts.rem_euclid(300);
-        if r == 0 { 300 } else { 300 - r }
+    /// Seconds remaining until the current `window_minutes`-minute window closes.
+    /// Returns full window length when exactly at a boundary, counting down to 1
+    /// one second before next boundary.
+    pub fn seconds_to_next_boundary(&self, now_ts: i64, window_minutes: u32) -> i64 {
+        let secs = window_minutes as i64 * 60;
+        let r = now_ts.rem_euclid(secs);
+        if r == 0 { secs } else { secs - r }
     }
 }
 
 use crate::domain::AppEvent;
-use crate::trader::market::MarketDiscovery;
+use crate::trader::market::{floor_window, MarketDiscovery};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-
-/// Floor a UTC epoch second to its 5-minute boundary.
-fn floor_5min(now_ts: i64) -> i64 {
-    now_ts - now_ts.rem_euclid(300)
-}
 
 async fn emit(tx: &mpsc::Sender<AppEvent>, state: &MarketState) {
     let _ = tx.send(AppEvent::MarketUpdate(state.clone())).await;
@@ -92,9 +93,11 @@ pub async fn run(
     price_feed: Arc<dyn BtcPriceFeed>,
     market: Arc<dyn MarketDiscovery>,
     event_tx: mpsc::Sender<AppEvent>,
+    mut window_minutes_rx: mpsc::Receiver<u32>,
     shutdown: CancellationToken,
 ) {
     let mut state = MarketState::empty();
+    let mut window_minutes: u32 = 5;
     let mut rpc_ticker = tokio::time::interval(Duration::from_secs(5));
     let mut gamma_ticker = tokio::time::interval(Duration::from_secs(15));
 
@@ -102,6 +105,15 @@ pub async fn run(
         tokio::select! {
             biased;
             _ = shutdown.cancelled() => break,
+
+            Some(new_mins) = window_minutes_rx.recv() => {
+                if window_minutes != new_mins {
+                    window_minutes = new_mins;
+                    state.window_minutes = new_mins;
+                    state.window_ts = None;  // force re-fetch on next gamma tick
+                    emit(&event_tx, &state).await;
+                }
+            }
 
             _ = rpc_ticker.tick() => {
                 if let Ok(p) = price_feed.latest_price().await {
@@ -113,7 +125,7 @@ pub async fn run(
                     // This matches Polymarket's actual resolution mechanic
                     // (BTC at open vs close).
                     let now_ts = chrono::Utc::now().timestamp();
-                    let current_window = floor_5min(now_ts);
+                    let current_window = floor_window(now_ts, window_minutes);
                     if state.window_ts != Some(current_window) {
                         state.window_ts = Some(current_window);
                         state.price_to_beat = Some(p);
@@ -124,11 +136,11 @@ pub async fn run(
 
             _ = gamma_ticker.tick() => {
                 let now_ts = chrono::Utc::now().timestamp();
-                let current_window = floor_5min(now_ts);
+                let current_window = floor_window(now_ts, window_minutes);
                 // Best-effort: if gamma DOES have an official priceToBeat
                 // (only true for windows that have already closed), prefer it
                 // over our local snapshot.
-                if let Ok(m) = market.find_window(current_window).await {
+                if let Ok(m) = market.find_window(current_window, window_minutes).await {
                     if let Some(p) = m.price_to_beat {
                         state.price_to_beat = Some(p);
                     }
@@ -157,6 +169,7 @@ mod tests {
             current_price: current_price.map(|s| Decimal::from_str(s).unwrap()),
             last_rpc_ok_at: None,
             last_gamma_ok_at: None,
+            window_minutes: 5,
         }
     }
 
@@ -230,28 +243,56 @@ mod tests {
     fn seconds_to_next_boundary_at_open() {
         // 1700000100 % 300 == 0: exactly at a window boundary → 300s remain
         let s = MarketState::empty();
-        assert_eq!(s.seconds_to_next_boundary(1700000100), 300);
+        assert_eq!(s.seconds_to_next_boundary(1700000100, 5), 300);
     }
 
     #[test]
     fn seconds_to_next_boundary_mid_window() {
         // 1700000200 % 300 == 100: 100s into window → 200s remain
         let s = MarketState::empty();
-        assert_eq!(s.seconds_to_next_boundary(1700000200), 200);
+        assert_eq!(s.seconds_to_next_boundary(1700000200, 5), 200);
     }
 
     #[test]
     fn seconds_to_next_boundary_at_close() {
         // 1700000400 % 300 == 0: next window boundary → 300s remain
         let s = MarketState::empty();
-        assert_eq!(s.seconds_to_next_boundary(1700000400), 300);
+        assert_eq!(s.seconds_to_next_boundary(1700000400, 5), 300);
     }
 
     #[test]
     fn seconds_to_next_boundary_one_before_close() {
         // 1700000399 % 300 == 299: one second before boundary → 1s remains
         let s = MarketState::empty();
-        assert_eq!(s.seconds_to_next_boundary(1700000399), 1);
+        assert_eq!(s.seconds_to_next_boundary(1700000399, 5), 1);
+    }
+
+    #[test]
+    fn seconds_to_next_boundary_15m() {
+        // 1700000600 % 900 = 500 → 400s remaining
+        let s = state_with(None, None);
+        assert_eq!(s.seconds_to_next_boundary(1700000600, 15), 400);
+        // 1700000100 % 900 = 0 → exactly at boundary → full 900s remain
+        assert_eq!(s.seconds_to_next_boundary(1700000100, 15), 900);
+    }
+
+    #[test]
+    fn seconds_to_next_boundary_5m_unchanged() {
+        let s = state_with(None, None);
+        assert_eq!(s.seconds_to_next_boundary(1700000200, 5), 200);
+    }
+
+    #[tokio::test]
+    async fn market_state_carries_window_minutes() {
+        let s = MarketState {
+            window_ts: Some(1700000000),
+            price_to_beat: None,
+            current_price: None,
+            last_rpc_ok_at: None,
+            last_gamma_ok_at: None,
+            window_minutes: 15,
+        };
+        assert_eq!(s.window_minutes, 15);
     }
 
     #[test]
@@ -262,6 +303,7 @@ mod tests {
         assert!(s.current_price.is_none());
         assert!(s.last_rpc_ok_at.is_none());
         assert!(s.last_gamma_ok_at.is_none());
+        assert_eq!(s.window_minutes, 5);
     }
 
     use crate::trader::errors::MarketError;
@@ -325,7 +367,9 @@ mod tests {
     }
     #[async_trait]
     impl MarketDiscovery for FakeMarket {
-        async fn find_window(&self, _ts: i64) -> Result<WindowMarket, MarketError> {
+        async fn find_window(&self, _ts: i64, _mins: u32)
+            -> Result<WindowMarket, MarketError>
+        {
             let mut q = self.responses.lock().unwrap();
             if q.is_empty() {
                 return Err(MarketError::NotFound { window_ts: 0 });
@@ -340,9 +384,10 @@ mod tests {
         let feed = FakePriceFeed::ok("80000");
         let market = FakeMarket::with_price_to_beat("80100");
         let (tx, mut rx) = mpsc::channel::<AppEvent>(64);
+        let (_mins_tx, mins_rx) = mpsc::channel::<u32>(8);
         let shutdown = CancellationToken::new();
 
-        let task = tokio::spawn(run(feed, market, tx, shutdown.clone()));
+        let task = tokio::spawn(run(feed, market, tx, mins_rx, shutdown.clone()));
         // Yield once so the spawned task can register its intervals before we advance.
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(6)).await;
@@ -369,9 +414,10 @@ mod tests {
         let feed = FakePriceFeed::ok("80000");
         let market = FakeMarket::with_price_to_beat("80100");
         let (tx, mut rx) = mpsc::channel::<AppEvent>(64);
+        let (_mins_tx, mins_rx) = mpsc::channel::<u32>(8);
         let shutdown = CancellationToken::new();
 
-        let task = tokio::spawn(run(feed, market, tx, shutdown.clone()));
+        let task = tokio::spawn(run(feed, market, tx, mins_rx, shutdown.clone()));
         // Yield once so the spawned task can register its intervals before we advance.
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(20)).await;
@@ -410,9 +456,10 @@ mod tests {
             })]),
         });
         let (tx, mut rx) = mpsc::channel::<AppEvent>(64);
+        let (_mins_tx, mins_rx) = mpsc::channel::<u32>(8);
         let shutdown = CancellationToken::new();
 
-        let task = tokio::spawn(run(feed, market, tx, shutdown.clone()));
+        let task = tokio::spawn(run(feed, market, tx, mins_rx, shutdown.clone()));
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(6)).await;
         tokio::task::yield_now().await;
@@ -438,9 +485,10 @@ mod tests {
         let feed = FakePriceFeed::fail();
         let market = FakeMarket::always_fail();
         let (tx, mut rx) = mpsc::channel::<AppEvent>(64);
+        let (_mins_tx, mins_rx) = mpsc::channel::<u32>(8);
         let shutdown = CancellationToken::new();
 
-        let task = tokio::spawn(run(feed, market, tx, shutdown.clone()));
+        let task = tokio::spawn(run(feed, market, tx, mins_rx, shutdown.clone()));
         // Yield once so the spawned task can register its intervals before we advance.
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(11)).await;
@@ -460,9 +508,10 @@ mod tests {
         let feed = FakePriceFeed::ok("80000");
         let market = FakeMarket::always_fail();
         let (tx, _rx) = mpsc::channel::<AppEvent>(64);
+        let (_mins_tx, mins_rx) = mpsc::channel::<u32>(8);
         let shutdown = CancellationToken::new();
 
-        let task = tokio::spawn(run(feed, market, tx, shutdown.clone()));
+        let task = tokio::spawn(run(feed, market, tx, mins_rx, shutdown.clone()));
         shutdown.cancel();
         tokio::time::timeout(Duration::from_secs(1), task).await
             .expect("task exits within 1s")

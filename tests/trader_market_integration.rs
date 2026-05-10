@@ -22,7 +22,7 @@ async fn open_market_decoded_correctly() {
         .mount(&server).await;
 
     let disc = GammaMarketDiscovery::new(server.uri());
-    let m = disc.find_window(1700000300).await.unwrap();
+    let m = disc.find_window(1700000300, 5).await.unwrap();
     assert_eq!(m.up_token_id, "u");
     assert_eq!(m.down_token_id, "d");
 }
@@ -35,7 +35,7 @@ async fn empty_response_returns_not_found() {
         .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
         .mount(&server).await;
     let disc = GammaMarketDiscovery::new(server.uri());
-    let r = disc.find_window(1700000300).await;
+    let r = disc.find_window(1700000300, 5).await;
     assert!(matches!(r, Err(MarketError::NotFound { .. })));
 }
 
@@ -47,7 +47,7 @@ async fn http_500_returns_network() {
         .respond_with(ResponseTemplate::new(500))
         .mount(&server).await;
     let disc = GammaMarketDiscovery::new(server.uri());
-    let r = disc.find_window(1700000300).await;
+    let r = disc.find_window(1700000300, 5).await;
     assert!(matches!(r, Err(MarketError::Network(_))));
 }
 
@@ -59,6 +59,6 @@ async fn malformed_body_returns_decode() {
         .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
         .mount(&server).await;
     let disc = GammaMarketDiscovery::new(server.uri());
-    let r = disc.find_window(1700000300).await;
+    let r = disc.find_window(1700000300, 5).await;
     assert!(matches!(r, Err(MarketError::Decode(_))));
 }

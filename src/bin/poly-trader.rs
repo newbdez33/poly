@@ -58,7 +58,7 @@ async fn main() -> Result<()> {
     // defeated by the wrapper's cache-bust param, closure should be visible
     // within ~30s of actual close, but the wider window absorbs CDN tail.
     let resolver: Arc<dyn WindowResolver> =
-        Arc::new(PolymarketResolver::new(market.clone(), Duration::from_secs(600)));
+        Arc::new(PolymarketResolver::new(market.clone(), Duration::from_secs(600), 5));
 
     let (executor, events): (Arc<dyn OrderExecutor>, Arc<dyn OrderEventStream>) = if args.dry_run {
         // Pair SimulatedExecutor + SimulatedOrderEvents: the events stream

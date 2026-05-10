@@ -21,15 +21,16 @@ pub struct PolymarketResolver {
     market: Arc<dyn MarketDiscovery>,
     tick: Duration,
     timeout: Duration,
+    window_minutes: u32,
 }
 
 impl PolymarketResolver {
-    pub fn new(market: Arc<dyn MarketDiscovery>, timeout: Duration) -> Self {
-        Self { market, tick: Duration::from_secs(2), timeout }
+    pub fn new(market: Arc<dyn MarketDiscovery>, timeout: Duration, window_minutes: u32) -> Self {
+        Self { market, tick: Duration::from_secs(2), timeout, window_minutes }
     }
     /// Smaller tick for tests under `tokio::time::pause()`.
-    pub fn with_tick(market: Arc<dyn MarketDiscovery>, tick: Duration, timeout: Duration) -> Self {
-        Self { market, tick, timeout }
+    pub fn with_tick(market: Arc<dyn MarketDiscovery>, tick: Duration, timeout: Duration, window_minutes: u32) -> Self {
+        Self { market, tick, timeout, window_minutes }
     }
 }
 
@@ -38,7 +39,7 @@ impl WindowResolver for PolymarketResolver {
     async fn await_resolution(&self, market: &WindowMarket) -> Result<Resolution, ResolveError> {
         let deadline = tokio::time::Instant::now() + self.timeout;
         loop {
-            match self.market.find_window(market.window_ts).await {
+            match self.market.find_window(market.window_ts, self.window_minutes).await {
                 Ok(latest) if latest.closed => {
                     let winner = latest.winner.ok_or_else(|| {
                         ResolveError::Market(MarketError::Decode(
@@ -79,7 +80,9 @@ mod tests {
     }
     #[async_trait]
     impl MarketDiscovery for ScriptedDiscovery {
-        async fn find_window(&self, _ts: i64) -> Result<WindowMarket, MarketError> {
+        async fn find_window(&self, _ts: i64, _mins: u32)
+            -> Result<WindowMarket, MarketError>
+        {
             let mut q = self.responses.lock().unwrap();
             if q.is_empty() {
                 return Err(MarketError::NotFound { window_ts: 0 });
@@ -111,7 +114,7 @@ mod tests {
     async fn resolves_immediately_when_already_closed() {
         let disc = ScriptedDiscovery::new(vec![Ok(closed_market(Direction::Up))]);
         let resolver = PolymarketResolver::with_tick(
-            disc, Duration::from_millis(1), Duration::from_secs(60));
+            disc, Duration::from_millis(1), Duration::from_secs(60), 5);
         let r = resolver.await_resolution(&open_market()).await.unwrap();
         assert_eq!(r.winner, Direction::Up);
     }
@@ -125,7 +128,7 @@ mod tests {
             Ok(closed_market(Direction::Down)),
         ]);
         let resolver = PolymarketResolver::with_tick(
-            disc, Duration::from_secs(2), Duration::from_secs(60));
+            disc, Duration::from_secs(2), Duration::from_secs(60), 5);
         let task = tokio::spawn(async move {
             resolver.await_resolution(&open_market()).await
         });
@@ -140,7 +143,7 @@ mod tests {
         let many_open: Vec<_> = std::iter::repeat_with(|| Ok(open_market())).take(40).collect();
         let disc = ScriptedDiscovery::new(many_open);
         let resolver = PolymarketResolver::with_tick(
-            disc, Duration::from_secs(2), Duration::from_secs(60));
+            disc, Duration::from_secs(2), Duration::from_secs(60), 5);
         let task = tokio::spawn(async move {
             resolver.await_resolution(&open_market()).await
         });
@@ -157,7 +160,7 @@ mod tests {
             Ok(closed_market(Direction::Up)),
         ]);
         let resolver = PolymarketResolver::with_tick(
-            disc, Duration::from_secs(2), Duration::from_secs(60));
+            disc, Duration::from_secs(2), Duration::from_secs(60), 5);
         let task = tokio::spawn(async move {
             resolver.await_resolution(&open_market()).await
         });
@@ -170,7 +173,7 @@ mod tests {
     async fn network_error_returns_market_err() {
         let disc = ScriptedDiscovery::new(vec![Err(MarketError::Network("boom".into()))]);
         let resolver = PolymarketResolver::with_tick(
-            disc, Duration::from_millis(1), Duration::from_secs(60));
+            disc, Duration::from_millis(1), Duration::from_secs(60), 5);
         let r = resolver.await_resolution(&open_market()).await;
         assert!(matches!(r, Err(ResolveError::Market(MarketError::Network(_)))));
     }

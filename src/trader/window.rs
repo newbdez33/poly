@@ -39,7 +39,8 @@ pub async fn run_window(
     window_ts: i64,
 ) -> WindowOutcome {
     // Step 1: discover market
-    let market = match deps.market.find_window(window_ts).await {
+    let mins = (cfg.window_seconds / 60) as u32;
+    let market = match deps.market.find_window(window_ts, mins).await {
         Ok(m) => m,
         Err(MarketError::NotFound { .. }) => {
             emit_kind(deps, ladder, TraderEventKind::EntryDecision {
@@ -311,7 +312,9 @@ mod tests {
     }
     #[async_trait]
     impl MarketDiscovery for StubMarket {
-        async fn find_window(&self, _ts: i64) -> Result<WindowMarket, MarketError> {
+        async fn find_window(&self, _ts: i64, _mins: u32)
+            -> Result<WindowMarket, MarketError>
+        {
             self.result.lock().unwrap().take()
                 .unwrap_or_else(|| Err(MarketError::NotFound { window_ts: 0 }))
         }

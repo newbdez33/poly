@@ -331,7 +331,7 @@ fn render_market_strip(frame: &mut Frame, area: Rect, state: &UiState) {
 
     spans.push(Span::raw("   "));
     let now_ts = state.now.timestamp();
-    let secs = m.seconds_to_next_boundary(now_ts);
+    let secs = m.seconds_to_next_boundary(now_ts, 5);
     // Clock emoji (\u{23f1}) is 2-cell wide on most terminals — pad with two
     // spaces so the timer doesn't visually hug the icon.
     if secs > 0 && secs < 300 {

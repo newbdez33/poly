@@ -35,7 +35,10 @@ impl WindowMarket {
 
 #[async_trait]
 pub trait MarketDiscovery: Send + Sync {
-    async fn find_window(&self, window_ts: i64) -> Result<WindowMarket, MarketError>;
+    /// Discover the market for a given window. `window_minutes` selects the
+    /// 5/15/60-min market family.
+    async fn find_window(&self, window_ts: i64, window_minutes: u32)
+        -> Result<WindowMarket, MarketError>;
 }
 
 /// Total seconds in a `window_minutes`-long window.
