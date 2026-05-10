@@ -76,11 +76,19 @@ fn render_balance(frame: &mut Frame, area: Rect, state: &UiState) {
 /// Build position lines for the balance box.
 ///
 /// States:
-/// - positions = None             -> ["Loading positions..."] (dim)
-/// - positions = Some(empty)      -> ["No open positions"] (dim)
-/// - positions = Some(items)      -> one line per item, sorted by market_slug
-///   for stable order across fetches (data-api can shuffle them)
+/// - positions = None              -> ["Loading positions..."] (dim)
+/// - positions = Some(empty)       -> ["No open positions"] (dim)
+/// - positions = Some(only-zero)   -> ["No open positions"] (worthless dust filtered)
+/// - positions = Some(live items)  -> one line per item with current_price > 0,
+///   sorted by market_slug for stable order across fetches (data-api can shuffle)
+///
+/// Filter rule: hide positions where `current_price == 0`. These are resolved
+/// losers — worthless ERC-1155 tokens that linger in the wallet until manual
+/// cleanup. They'd otherwise appear forever as "(-100%)" lines, drowning out
+/// real positions. Run `poly-redeem` to clear them.
 fn position_lines(state: &UiState) -> Vec<Line<'static>> {
+    use rust_decimal::Decimal;
+
     let p = match &state.positions {
         None => return vec![Line::from(Span::styled(
             "Loading positions\u{2026}",
@@ -93,7 +101,17 @@ fn position_lines(state: &UiState) -> Vec<Line<'static>> {
         Some(p) => p,
     };
 
-    let mut items: Vec<&crate::positions::Position> = p.items.iter().collect();
+    let mut items: Vec<&crate::positions::Position> = p.items.iter()
+        .filter(|pos| pos.current_price > Decimal::ZERO)
+        .collect();
+
+    if items.is_empty() {
+        return vec![Line::from(Span::styled(
+            "No open positions",
+            Style::default().fg(Color::DarkGray),
+        )).alignment(Alignment::Center)];
+    }
+
     items.sort_by(|a, b| a.market_slug.cmp(&b.market_slug));
     items.into_iter().map(format_position_line).collect()
 }
