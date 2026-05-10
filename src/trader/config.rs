@@ -52,6 +52,11 @@ pub struct TraderArgs {
     /// skip windows when liquidity is thin. Only valid with --exit-rule tp-sl.
     #[arg(long)]
     pub maker: bool,
+    /// Trading window length in minutes. {5, 15, 60}. 5 has full backtest
+    /// coverage; 15 has observed deeper liquidity but is unvalidated; 60 is
+    /// unvalidated. Default 5.
+    #[arg(long, default_value = "5")]
+    pub window_minutes: u32,
 }
 
 impl TraderArgs {
@@ -62,6 +67,9 @@ impl TraderArgs {
            || self.band_min < Decimal::ZERO
            || self.band_max > Decimal::ONE {
             return Err(ConfigError::InvalidBand);
+        }
+        if !matches!(self.window_minutes, 5 | 15 | 60) {
+            return Err(ConfigError::InvalidWindowMinutes);
         }
         if self.poll_secs == 0 || self.poll_secs > 30 {
             return Err(ConfigError::InvalidPollSecs);
@@ -104,6 +112,8 @@ pub enum ConfigError {
     ExitRuleInvertedThresholds,
     #[error("--maker requires --exit-rule tp-sl")]
     MakerRequiresTpSl,
+    #[error("window-minutes must be 5, 15, or 60")]
+    InvalidWindowMinutes,
 }
 
 #[cfg(test)]
@@ -285,6 +295,44 @@ mod tests {
             "--sl-price", "0.45",
             "--maker",
         ]);
+        assert!(a.validate().is_ok());
+    }
+
+    #[test]
+    fn parses_window_minutes_default_5() {
+        let a = parse(&["--direction", "up"]);
+        assert_eq!(a.window_minutes, 5);
+    }
+
+    #[test]
+    fn parses_window_minutes_15() {
+        let a = parse(&["--direction", "up", "--window-minutes", "15"]);
+        assert_eq!(a.window_minutes, 15);
+    }
+
+    #[test]
+    fn parses_window_minutes_60() {
+        let a = parse(&["--direction", "up", "--window-minutes", "60"]);
+        assert_eq!(a.window_minutes, 60);
+    }
+
+    #[test]
+    fn validate_rejects_window_minutes_7() {
+        let mut a = parse(&["--direction", "up"]);
+        a.window_minutes = 7;
+        assert_eq!(a.validate(), Err(ConfigError::InvalidWindowMinutes));
+    }
+
+    #[test]
+    fn validate_rejects_window_minutes_0() {
+        let mut a = parse(&["--direction", "up"]);
+        a.window_minutes = 0;
+        assert_eq!(a.validate(), Err(ConfigError::InvalidWindowMinutes));
+    }
+
+    #[test]
+    fn validate_accepts_window_minutes_15() {
+        let a = parse(&["--direction", "up", "--window-minutes", "15"]);
         assert!(a.validate().is_ok());
     }
 }
