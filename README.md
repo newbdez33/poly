@@ -136,8 +136,9 @@ See `TODO.md`. Highlights:
 - **v1.2** ✅ — BTC market watch strip (live Chainlink price + countdown)
 - **v1.4** ✅ — backtest framework (`poly-backtest` binary, 6 strategies, HTML report)
 - **v1.5** ✅ — TP/SL exits in trader (`--exit-rule tp-sl`)
+- **v1.6** ✅ — TUI positions (live diagnostic of stuck shares)
 - **v1.3** — daemon / TUI split. Required before any new trading logic (multi-strategy, dynamic config, etc.)
-- **v1.6+** — strategy selection driven by v1.4 backtest, markets, positions, observability
+- **v1.7+** — strategy selection driven by v1.4 backtest, markets, observability
 
 ## Documentation
 
@@ -151,6 +152,8 @@ See `TODO.md`. Highlights:
 - `docs/superpowers/plans/2026-05-09-backtest-framework.md` — v1.4 plan (14 tasks)
 - `docs/superpowers/specs/2026-05-10-trader-tp-sl-design.md` — v1.5 design
 - `docs/superpowers/plans/2026-05-10-trader-tp-sl.md` — v1.5 plan
+- `docs/superpowers/specs/2026-05-10-tui-positions-design.md` — v1.6 design
+- `docs/superpowers/plans/2026-05-10-tui-positions.md` — v1.6 plan
 - `TODO.md` — roadmap and v1.3 daemon split plan
 
 ## Trader
@@ -264,6 +267,25 @@ Configure the Polygon RPC endpoint via `POLYGON_RPC_URL` in `.env` (default:
 `https://polygon-rpc.com`). If the default endpoint is rate-limited (HTTP 401
 "API key disabled" is a known intermittent issue with the public RPC), use a
 maintained provider URL like Alchemy or Infura.
+
+## TUI positions
+
+The balance box shows live Polymarket positions polled from `data-api.polymarket.com/positions?user=<proxy_address>` every 30s. The proxy address is derived deterministically from your `POLYMARKET_PRIVATE_KEY` at startup.
+
+| Cache state | Render |
+|---|---|
+| No fetch yet | `Loading positions…` |
+| Empty array | `No open positions` |
+| 1 holding | `Holding: 10 UP @ $0.500  now $4.85 (-3%)` |
+| Multiple | One line per holding |
+
+Why: catches stuck shares from `SellRejected` / `Alert` events, leftover positions from prior sessions, and any holdings the trader didn't open.
+
+To inspect the cached positions outside the TUI:
+
+```bash
+docker exec poly-redis redis-cli GET poly:prod:positions | jq .
+```
 
 ## Backtest framework
 

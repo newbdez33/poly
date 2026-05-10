@@ -145,6 +145,21 @@ First real CLOB run: `--max-windows 12 --max-step 5 --exit-rule tp-sl --tp-price
 
 ---
 
+## v1.6 — TUI Positions ✅ COMPLETE
+
+Live position display in the TUI balance box, sourced from `data-api.polymarket.com/positions`. Catches stuck shares from `SellRejected`/`Alert` events. Proxy address derived from EOA via SDK's `derive_proxy_wallet(eoa, POLYGON)`. See `docs/superpowers/specs/2026-05-10-tui-positions-design.md`.
+
+- [x] `Position` / `Positions` / `Side` types + `PositionsFetcher` / `PositionsCache` traits
+- [x] `PolymarketPositionsFetcher` — wraps SDK `data::Client::positions`
+- [x] `RedisPositionsCache` — JSON in/out at `poly:prod:positions`
+- [x] `Positioner` task with immediate first fetch + 30s loop
+- [x] `AppEvent::PositionsUpdate(Positions)` and `AppState.positions`
+- [x] `render_balance` — 2-line layout (USDC + positions)
+- [x] Wire into `poly-tui` main: derive proxy from EOA at startup
+- [x] Integration test: testcontainers Redis + stub fetcher → assert event + cached state
+
+---
+
 ## v1.3 — Daemon / TUI 拆分（方案 2 重构）
 
 **触发条件：** 准备扩展交易逻辑（多策略、热加载配置、动态切方向）时，必须先做这次拆分。当前 v1.1 trader 单方向 + dry-run 够用，但任何更复杂的形态都要先把 daemon 做出来。
