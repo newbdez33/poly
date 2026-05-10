@@ -204,6 +204,35 @@ Backtest distribution: ~29% TP, ~58% SL, ~13% deadline fall-through. If your liv
 
 **Fall back to v1.1:** omit `--exit-rule` (or pass `--exit-rule hold`). No state migration needed; the ladder is mode-agnostic.
 
+### Maker mode (v1.7)
+
+The `--maker` flag switches BUY entry + TP exit from market orders to limit orders. Saves ~1% taker fees per round-trip. SL stays as market sell — a limit-priced SL would not protect against fast price drops.
+
+```bash
+poly-trader --direction up --base 5 \
+  --exit-rule tp-sl --tp-price 0.85 --sl-price 0.45 \
+  --maker
+```
+
+| Time | Action |
+|---|---|
+| t=0 | LIMIT BUY @ ask−$0.01 (e.g. 0.49) |
+| t=30 | Cancel + re-post @ ask (0.50) |
+| t=60 | Cancel + re-post @ ask+$0.01 (0.51, becomes taker) |
+| t=90 | Cancel + skip window (no entry) |
+| after buy fill | LIMIT TP @ tp_price (e.g. 0.85) |
+| TP fully fills | Won, exit |
+| TP partial fill | Keep resting, accumulate proceeds |
+| SL bid <= sl_price | Cancel TP, market sell residual |
+| t=270 | Cancel TP, market sell residual at current bid |
+
+`--maker` requires `--exit-rule tp-sl` (will reject otherwise). Default is off — v1.5 market-order behavior preserved bit-for-bit.
+
+**Caveats:**
+- Requires Polymarket maker-fee structure for actual savings. If maker == taker, v1.7 == v1.5 cost.
+- Lower window participation (~5–10% windows skipped due to entry sweep exhausting). Backtest assumed 100% — discount expectation accordingly.
+- Fill detection via 2s polling (≤2s latency vs market order's instant fill).
+
 ### Dry-run vs real-money differences
 
 Dry-run uses `SimulatedExecutor` with these approximations vs the real CLOB:

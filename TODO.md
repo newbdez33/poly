@@ -195,56 +195,25 @@ Polymarket Magic/邮箱账户的 EOA 默认 **0 MATIC**——CLOB 交易走 Poly
 
 ---
 
-## v1.7 — Limit-order maker mode (待 24h 真钱数据后决定)
+## v1.7 — Limit-order maker mode ✅ COMPLETE
 
-**触发条件：** 24 小时真钱跑完，确认 backtest 模型在实盘成立后再启动。
+`--maker` flag activates limit BUY (with 30s/60s/90s sweep) + limit TP. SL stays market. End-of-window: cancel TP at t=270s + market-sell residual. See `docs/superpowers/specs/2026-05-10-trader-maker-mode-design.md`.
 
-**思路：** 用挂单（限价单 / maker）代替市价单（taker），节省 1–2% 手续费 + 更精确的成交价。
+- [x] CLI: `--maker` flag with `--exit-rule tp-sl` validation
+- [x] `OrderId` + `OrderSide` types; `ExecError::NotSupported`
+- [x] `OrderExecutor::place_limit` + `cancel` (default NotSupported, real impls in Clob + Sim adapters)
+- [x] `OrderEventStream` trait + 2s polling impl (`PolymarketPollOrderEvents`) + scripted stub
+- [x] `run_maker` state machine — PendingBuy + PendingTpSell phases via tokio::select!
+- [x] 4 new event variants: `BuyLimitPosted`, `BuyLimitSwept`, `TpLimitPosted`, `TpLimitFilled`
+- [x] dispatch in `run_window`: maker → `run_maker`, taker → existing v1.5 path
+- [x] dry-run uses `AutoFillEvents` stub for state-machine validation
+- [x] Integration test: Redis event roundtrip + run_maker happy-path
+- [x] README + TODO docs
 
-### 核心设计
-
-```
-窗口开始：
-  ├── 挂限价 BUY @ 0.49（maker, 0% 费）
-  │     如果 5s 内没成交 → 升价至 0.50 → 0.51（升价 sweep）
-  │     如果到 30s 还没成交 → 放弃，跳过窗口
-
-进入持仓状态：
-  ├── 立即挂限价 SELL @ 0.85（TP，maker, 0% 费）
-  └── 启动 ExitWatcher（监控 SL = 0.45）
-       SL 触发 → 取消挂着的 0.85 卖单 → 市价卖（taker, 1% 费）
-       到窗口末没触发 → 取消 0.85 卖单 → 走结算路径
-```
-
-### 关键约束
-
-- **止损（SL）必须保留市价单**——限价 SL 在 BTC 跳水时不会成交，会被困住到结算 → 全损
-- 所以是混合模式：TP 挂单（maker）+ SL 市价（taker）+ 进场挂单（maker）
-
-### 实现工作量
-
-- `OrderExecutor` 新增 `place_limit_order(token, side, price, shares)` + `cancel_order(id)`
-- Window state 跟踪 order ID（`buy_order_id`, `tp_order_id`）
-- `run_window` 大改：从"立即买"变成"挂单等成交 → 升价 sweep → 超时跳过"
-- 处理三方 race condition：TP 成交 vs SL 触发 vs 窗口结束
-- 最好用 CLOB websocket 订阅 fill 事件（否则要轮询 fills 端点）
-- 测试：单元 + e2e，至少覆盖 TP-成交、SL-触发-取消-TP、超时-取消
-
-工作量约 v1.5 trader 改动的 1.5–2 倍，是个独立 v1.7 spec。
-
-### 收益估算
-
-按 backtest 30 天 ~290 个窗口、约 100 个 TP 成交（29% 触发率）：
-
-- 每个 TP 省约 $0.05–$0.85（取决于 step 1–5）
-- 加权省下：约 $30–$80 / 30 天
-- backtest strategy 4 是 +$7,500/30 天 → **节省 0.4–1.1%**
-
-### 决策门槛
-
-- 如果 24h 真钱跑出实际盈利 → 投入 v1.7 工作合理
-- 如果实盘 PnL 偏离 backtest >20% → 先排查模型问题，v1.7 暂缓
-- 如果想先简单测试，可以**直接调 TP 0.85 → 0.83** 吸收 taker 费（0 代码改动）
+**Open items / next versions:**
+- WebSocket fill detection (v1.7.1) — currently polling-only at 2s
+- Single-CLOB-client refactor (v1.7.2) — currently `inner_client()` accessor on executor; cleaner ownership chain possible
+- Real-money A/B comparison vs v1.5 to measure actual fee savings
 
 ---
 
