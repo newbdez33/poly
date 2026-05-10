@@ -45,58 +45,45 @@ Sweep results (Apr-May, 8509 windows, σ ∈ {0.0, 0.03, 0.05, 0.08}):
 3. **Holding (no SL) survives noise.** `1_hold_martingale` is the only consistent profit center at σ=0.05.
 4. **TP-only beats hold under aggressive noise.** `2_tp_only_martingale` lets winners run, ignores noise; turns +$1,537 at σ=0.08 (only profitable strategy at that level).
 
-### Operator decision
+### Operator decision (2026-05-10)
 
-**Strategy 4 with `--maker --exit-rule tp-sl` is dead unless real σ < 0.03.** Today's one observation suggested σ ≈ 0.06 (bid 0.34 vs BS theoretical ~0.40). If validated by 24h+ of real-money data:
+**Strategy 4 ABANDONED.** σ-sweep confirmed strategy 4 is a noise-free artifact; survives only at σ=0. Today's observed gap-down implies σ ≈ 0.06 in reality. Any TP+SL combination collapses under realistic noise.
 
-- Drop `--exit-rule tp-sl` for now
-- Switch trader to `--exit-rule hold` (default, no TP/SL) → 1_hold_martingale behavior
-- Consider implementing `--exit-rule tp-only` (2_tp_only_martingale; new code, similar effort to v1.5)
+**Going forward, only two strategies are candidates:**
 
-**Open items / next:**
-- Replicate the σ-sweep on Mar and Feb samples to confirm collapse isn't sample-specific
-- v1.7.3: extend backtest to 15m/60m windows (separate)
-- v1.7.4: autocorrelated noise (AR(1)) if white-noise calibration insufficient
-- v1.8: implement `--exit-rule tp-only` in trader (just remove SL branch from existing tp-sl path)
+1. **`1_hold_martingale`** — already implemented as `--exit-rule hold` (default). No code change needed.
+2. **`2_tp_only_martingale`** — needs v1.8 implementation (`--exit-rule tp-only` flag, fork `sell_with_tp_sl` to drop the SL arm).
 
-Reports saved at: `report-noise-0.html`, `report-noise-3.html`, `report-noise-5.html`, `report-noise-8.html`
+**No further σ-sweep / 15m / 60m / real-trade-history work** until 1_hold or tp_only proves profitable in live A/B. v1.7.3 / v1.7.4 / v1.7.5 are deprioritized — they were optimizing a strategy we no longer trust.
+
+Reports saved: `report-noise-0.html`, `report-noise-3.html`, `report-noise-5.html`, `report-noise-8.html`. Keep for reference.
 
 ---
 
-## v1.8 — `--exit-rule tp-only` trader candidate ⏳ TODO
+## v1.8 — `--exit-rule tp-only` trader candidate ⏳ TODO (NEXT)
 
-**Trigger:** if real-money σ-calibration confirms σ ≥ 0.03 (strategy 4 dead) AND `2_tp_only_martingale` survives noise across multiple historical samples.
+**Decision (2026-05-10):** Strategy 4 abandoned. Two surviving candidates: `1_hold_martingale` (already implemented as `--exit-rule hold` default) and `2_tp_only_martingale` (this work).
 
-**Goal:** Add `tp-only` to trader's existing `--exit-rule {hold|tp-sl}` enum. New variant: place limit BUY at entry, place limit TP at `--tp-price` (e.g., 0.75 from `2_tp_only_martingale`), no SL — hold to resolution if TP doesn't fire. Maker mode applies (limit BUY + limit TP).
+**Goal:** Add `tp-only` variant to `--exit-rule {hold|tp-sl|tp-only}`. Place limit BUY at entry, place limit TP at `--tp-price` (try 0.75 first per `2_tp_only_martingale`), no SL. If TP doesn't fire, hold to resolution. Maker mode applies (limit BUY + limit TP).
 
 **Scope:**
-- [ ] `src/trader/config.rs` — extend `ExitRuleArg` enum with `TpOnly`. Validate `tp-only` requires `--tp-price` only (no `--sl-price`).
+- [ ] `src/trader/config.rs` — extend `ExitRuleArg` enum with `TpOnly`. Validate `tp-only` requires `--tp-price`, rejects `--sl-price`.
 - [ ] `src/trader/maker.rs` — fork `sell_with_tp_sl` into `sell_with_tp_only`: same TP limit logic, no SL price-watch arm. Falls through to resolution path on TP miss.
-- [ ] `src/trader/window.rs` — dispatch `tp-only` → `run_maker_tp_only` (new) or extend run_maker with optional SL.
-- [ ] Test: TP fills → Won. TP doesn't fire → resolver winner-sweep (existing path).
+- [ ] `src/trader/window.rs` — dispatch `tp-only` → `run_maker_tp_only` (or extend `run_maker` with `Option<sl_price>`).
+- [ ] Test: TP fills → Won. TP doesn't fire → winner-sweep at resolution.
 - [ ] Real-money A/B test `tp-only` vs `hold` under same window count.
 
-Estimated work: ~1.5 hours (smaller than v1.7 since reuses most of maker mode infrastructure).
+Estimated work: ~1.5 hours (reuses v1.7 maker infrastructure).
 
 ---
 
-## v1.7.3 — Extend backtest to 15m / 60m windows ⏳ TODO
+## Deprioritized (originally for strategy 4 optimization, now moot)
 
-**Trigger:** before any real-money run with `--window-minutes 15` or `60`. Strategy 4 was validated on 5m only; the probability-structure-invariance argument is theoretical.
+These all assumed strategy 4 was worth chasing. Since strategy 4 is abandoned, they sit on the back burner. Resurrect only if `1_hold` or `tp_only` proves profitable AND we want to optimize them further.
 
-**Goal:** Add `--window-minutes 5|15|60` flag to `poly-backtest` (mirroring v1.7.1 trader change). Re-run the 6-strategy backtest on 15m data for the same 3 samples (Apr-May, Mar, Feb) and confirm strategy 4 EV is positive.
-
-**Scope:**
-- [ ] `src/bin/poly-backtest.rs` — add `--window-minutes` flag
-- [ ] `src/backtest/data/gamma_history.rs` — fetch slugs use `window_slug(ts, mins)`; iterate at the right boundary cadence
-- [ ] `src/backtest/oracle.rs` — sigma estimation works with 15m / 60m bars (1-min Binance data still fine)
-- [ ] `src/backtest/data/loader.rs` — verify per-second simulation horizon scales
-- [ ] Run 3-sample 30-day backtest on 15m → produce `backtest-report-15m-*.html`
-- [ ] Run 3-sample 30-day backtest on 60m → produce `backtest-report-60m-*.html` (if signal looks good on 15m)
-- [ ] Compare strategy 4 EV / win rate / cap-reset rate across 5m / 15m / 60m
-- [ ] Decision: if 15m EV ≥ 5m EV (in $/hr or % of stake), go live; else stay on 5m
-
-Estimated work: 2–3 hours including data fetch + report inspection.
+- **v1.7.3** — extend backtest to 15m / 60m windows
+- **v1.7.4** — autocorrelated noise (AR(1)) in oracle
+- **v1.7.5** — real Polymarket trade history backtest (replace BS oracle entirely)
 
 ---
 
