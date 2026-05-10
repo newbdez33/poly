@@ -26,6 +26,9 @@ pub struct WindowConfig {
     pub band_max: Decimal,
     pub exit: Option<ExitConfig>,
     pub maker: bool,
+    /// Window length in seconds (300/900/3600 for {5,15,60}-min). Threaded
+    /// into `run_maker` so its cancel deadline scales with window length.
+    pub window_seconds: i64,
 }
 
 /// Execute one 5-min window. Returns the WindowOutcome the FSM consumes.
@@ -418,6 +421,7 @@ mod tests {
             band_max: Decimal::from_str("0.55").unwrap(),
             exit: None,
             maker: false,
+            window_seconds: 300,
         }
     }
 
@@ -427,6 +431,7 @@ mod tests {
             band_max: Decimal::from_str("0.55").unwrap(),
             exit: Some(exit),
             maker: false,
+            window_seconds: 300,
         }
     }
 
@@ -435,6 +440,18 @@ mod tests {
         // Smoke: existing tests build WindowConfig without exit; default is None.
         let c = cfg();
         assert!(c.exit.is_none());
+    }
+
+    #[test]
+    fn window_config_carries_window_seconds() {
+        let c = WindowConfig {
+            band_min: Decimal::from_str("0.45").unwrap(),
+            band_max: Decimal::from_str("0.55").unwrap(),
+            exit: None,
+            maker: false,
+            window_seconds: 900,
+        };
+        assert_eq!(c.window_seconds, 900);
     }
 
     #[tokio::test]
@@ -869,6 +886,7 @@ mod tests {
                 poll: std::time::Duration::from_millis(50),
             }),
             maker: true,
+            window_seconds: 300,
         };
         let _outcome = run_window(&deps, &cfg, &fresh_ladder(), chrono::Utc::now().timestamp()).await;
 

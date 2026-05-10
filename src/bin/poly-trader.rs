@@ -151,6 +151,7 @@ async fn main() -> Result<()> {
         band_max: args.band_max,
         exit: exit_cfg,
         maker: args.maker,
+        window_seconds: 300,
     };
     let window_exec: Arc<dyn WindowExecutor> = Arc::new(BoundWindowExec {
         deps: window_deps.clone(),
