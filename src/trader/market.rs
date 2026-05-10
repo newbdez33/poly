@@ -110,10 +110,22 @@ pub fn decode_event_response(json: &str, window_ts: i64) -> Result<WindowMarket,
         None
     };
 
+    // Gamma sometimes returns priceToBeat as a JSON number (f64) and sometimes
+    // as a stringified decimal — the latter is common for live (un-resolved)
+    // windows. Try both before giving up.
     let price_to_beat = event.get("eventMetadata")
         .and_then(|m| m.get("priceToBeat"))
         .and_then(|p| p.as_f64())
-        .and_then(|f| rust_decimal::Decimal::from_str_exact(&f.to_string()).ok());
+        .and_then(|f| rust_decimal::Decimal::from_str_exact(&f.to_string()).ok())
+        .or_else(|| {
+            event.get("eventMetadata")
+                .and_then(|m| m.get("priceToBeat"))
+                .and_then(|p| p.as_str())
+                .and_then(|s| {
+                    use std::str::FromStr;
+                    rust_decimal::Decimal::from_str(s).ok()
+                })
+        });
 
     Ok(WindowMarket {
         window_ts,
@@ -263,6 +275,22 @@ mod tests {
         }]"#;
         let m = decode_event_response(json, 0).unwrap();
         assert_eq!(m.price_to_beat, Some(Decimal::from_str("80424.78").unwrap()));
+    }
+
+    #[test]
+    fn decode_extracts_price_to_beat_from_string() {
+        // Live/un-resolved windows often stringify priceToBeat. Trader was
+        // dropping these → TUI strip showed `--` instead of the live BTC price.
+        let json = r#"[{"markets":[{
+            "slug":"x", "closed":false,
+            "outcomes":"[\"Up\",\"Down\"]",
+            "clobTokenIds":"[\"u\",\"d\"]",
+            "outcomePrices":"[\"0.50\",\"0.50\"]"
+        }],
+        "eventMetadata": {"priceToBeat": "80615.42"}
+        }]"#;
+        let m = decode_event_response(json, 0).unwrap();
+        assert_eq!(m.price_to_beat, Some(Decimal::from_str("80615.42").unwrap()));
     }
 
     #[test]
