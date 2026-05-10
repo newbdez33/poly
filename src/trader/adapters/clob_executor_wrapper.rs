@@ -38,7 +38,7 @@
 // the authenticated client. The signer is Clone so this is safe.
 
 use crate::trader::errors::ExecError;
-use crate::trader::executor::{FillResult, OrderExecutor};
+use crate::trader::executor::{FillResult, OrderExecutor, OrderId, OrderSide};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 use std::str::FromStr;
@@ -222,5 +222,67 @@ impl OrderExecutor for ClobOrderExecutor {
             shares: shares_sold,
             dollars: dollars_received,
         })
+    }
+
+    async fn place_limit(
+        &self,
+        token_id: &str,
+        side: OrderSide,
+        price: Decimal,
+        shares: Decimal,
+    ) -> Result<OrderId, ExecError> {
+        let tid = U256::from_str(token_id)
+            .map_err(|e| ExecError::Decode(format!("invalid token_id '{token_id}': {e}")))?;
+
+        // Same precision rule as sell_market — CLOB requires <=2 decimal places.
+        let sellable = shares.trunc_with_scale(2);
+        if sellable.is_zero() {
+            return Err(ExecError::Decode(format!(
+                "share amount {shares} truncates to 0 — too small to place"
+            )));
+        }
+
+        let sdk_side = match side {
+            OrderSide::Buy => Side::Buy,
+            OrderSide::Sell => Side::Sell,
+        };
+
+        let signable = self
+            .client
+            .limit_order()
+            .token_id(tid)
+            .side(sdk_side)
+            .price(price)
+            .size(sellable)
+            .order_type(OrderType::GTC)
+            .build()
+            .await
+            .map_err(|e| ExecError::Network(format!("limit build failed: {e}")))?;
+
+        let signed = self
+            .client
+            .sign(&self.signer, signable)
+            .await
+            .map_err(|e| ExecError::Network(format!("limit sign failed: {e}")))?;
+
+        let resp = self
+            .client
+            .post_order(signed)
+            .await
+            .map_err(|e| ExecError::Network(format!("limit post failed: {e}")))?;
+
+        if !resp.success {
+            return Err(ExecError::FillOrKillFailed);
+        }
+
+        Ok(OrderId(resp.order_id))
+    }
+
+    async fn cancel(&self, order_id: &OrderId) -> Result<(), ExecError> {
+        self.client
+            .cancel_order(&order_id.0)
+            .await
+            .map(|_| ())
+            .map_err(|e| ExecError::Network(format!("cancel failed: {e}")))
     }
 }
