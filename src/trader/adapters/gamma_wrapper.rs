@@ -20,7 +20,7 @@ impl GammaMarketDiscovery {
 #[async_trait]
 impl MarketDiscovery for GammaMarketDiscovery {
     async fn find_window(&self, window_ts: i64) -> Result<WindowMarket, MarketError> {
-        let slug = window_slug(window_ts);
+        let slug = window_slug(window_ts, 5);
         // Cache-busting: gamma-api serves cached responses with ~60s TTL,
         // which keeps `closed:false` visible past actual market closure and
         // causes resolver timeouts. Appending a nonce defeats upstream caching

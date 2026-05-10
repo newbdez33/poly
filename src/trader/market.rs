@@ -38,21 +38,28 @@ pub trait MarketDiscovery: Send + Sync {
     async fn find_window(&self, window_ts: i64) -> Result<WindowMarket, MarketError>;
 }
 
-/// Slug for a 5-min BTC up/down market at the given epoch second (must be a
-/// multiple of 300).
-pub fn window_slug(window_ts: i64) -> String {
-    format!("btc-updown-5m-{window_ts}")
+/// Total seconds in a `window_minutes`-long window.
+pub fn window_seconds(window_minutes: u32) -> i64 { window_minutes as i64 * 60 }
+
+/// Slug for the BTC up/down market at a given window boundary.
+pub fn window_slug(window_ts: i64, window_minutes: u32) -> String {
+    format!("btc-updown-{}m-{}", window_minutes, window_ts)
 }
 
-/// Floor `now_ts` to the start of its 5-min window.
-pub fn floor_5min(now_ts: i64) -> i64 {
-    now_ts - (now_ts.rem_euclid(300))
+/// Floor `now_ts` to the start of its window of length `window_minutes`.
+pub fn floor_window(now_ts: i64, window_minutes: u32) -> i64 {
+    let secs = window_seconds(window_minutes);
+    now_ts - now_ts.rem_euclid(secs)
 }
 
-/// Next 5-min boundary strictly after `now_ts`.
-pub fn next_5min_boundary(now_ts: i64) -> i64 {
-    floor_5min(now_ts) + 300
+/// Next window boundary strictly after `now_ts`.
+pub fn next_window_boundary(now_ts: i64, window_minutes: u32) -> i64 {
+    floor_window(now_ts, window_minutes) + window_seconds(window_minutes)
 }
+
+// Backward-compat wrappers — internal callers migrate gradually.
+pub fn floor_5min(now_ts: i64) -> i64 { floor_window(now_ts, 5) }
+pub fn next_5min_boundary(now_ts: i64) -> i64 { next_window_boundary(now_ts, 5) }
 
 /// Pure decoder for a gamma-api event response. Extract the up/down outcomes by
 /// matching `outcome` strings ("Up" and "Down" — case-insensitive).
@@ -152,7 +159,7 @@ mod tests {
 
     #[test]
     fn slug_format() {
-        assert_eq!(window_slug(1747789200), "btc-updown-5m-1747789200");
+        assert_eq!(window_slug(1747789200, 5), "btc-updown-5m-1747789200");
     }
 
     #[test]
@@ -167,6 +174,56 @@ mod tests {
         assert_eq!(next_5min_boundary(1747789200), 1747789500);
         assert_eq!(next_5min_boundary(1747789499), 1747789500);
         assert_eq!(next_5min_boundary(1747789500), 1747789800);
+    }
+
+    #[test]
+    fn window_seconds_5m() { assert_eq!(window_seconds(5), 300); }
+    #[test]
+    fn window_seconds_15m() { assert_eq!(window_seconds(15), 900); }
+    #[test]
+    fn window_seconds_60m() { assert_eq!(window_seconds(60), 3600); }
+
+    #[test]
+    fn window_slug_includes_minutes() {
+        assert_eq!(window_slug(1747789200, 5), "btc-updown-5m-1747789200");
+        assert_eq!(window_slug(1747789200, 15), "btc-updown-15m-1747789200");
+        assert_eq!(window_slug(1747789200, 60), "btc-updown-60m-1747789200");
+    }
+
+    #[test]
+    fn floor_window_5m_matches_legacy() {
+        assert_eq!(floor_window(1700000100, 5), 1700000100);
+        assert_eq!(floor_window(1700000100, 5), floor_5min(1700000100));
+        assert_eq!(floor_window(1700000200, 5), floor_5min(1700000200));
+    }
+
+    #[test]
+    fn floor_window_15m() {
+        // 1700000900 % 900 = 800 → floor = 1700000100
+        assert_eq!(floor_window(1700000900, 15), 1700000100);
+        // 1700001000 % 900 = 0 → already on boundary
+        assert_eq!(floor_window(1700001000, 15), 1700001000);
+        // 1700001100 % 900 = 100 → floor = 1700001000
+        assert_eq!(floor_window(1700001100, 15), 1700001000);
+    }
+
+    #[test]
+    fn floor_window_60m() {
+        // 1700001500 % 3600 = 2300 → floor = 1699999200
+        assert_eq!(floor_window(1700001500, 60), 1699999200);
+        // 1700002800 is on a 3600 boundary (1700002800 % 3600 = 0)
+        assert_eq!(floor_window(1700002800, 60), 1700002800);
+    }
+
+    #[test]
+    fn next_window_boundary_5m_matches_legacy() {
+        assert_eq!(next_window_boundary(1700000100, 5), next_5min_boundary(1700000100));
+        assert_eq!(next_window_boundary(1700000200, 5), 1700000400);
+    }
+
+    #[test]
+    fn next_window_boundary_15m() {
+        assert_eq!(next_window_boundary(1700000200, 15), 1700001000);
     }
 
     #[test]
