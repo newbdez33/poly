@@ -30,11 +30,20 @@ pub struct UiState {
 
 pub fn render(frame: &mut Frame, state: &UiState) {
     let area = frame.area();
+    // Balance height: 2 borders + USDC + up to N position lines (capped at 4
+    // visible). Multi-position is rare with strategy 4 but happens after
+    // sell-failed alerts (stuck shares + new window position). Height 7 fits
+    // USDC + 4 positions; trader log absorbs the slack.
+    let pos_count = state.positions.as_ref()
+        .map(|p| p.items.len().min(4).max(1))
+        .unwrap_or(1);
+    let balance_h: u16 = 2 + 1 + pos_count as u16; // borders + usdc + positions
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5), // balance
-            Constraint::Length(1), // market strip (NEW)
+            Constraint::Length(balance_h), // balance (dynamic)
+            Constraint::Length(1), // market strip
             Constraint::Length(1), // trader sub-title
             Constraint::Min(0),    // trader log
             Constraint::Length(1), // status bar
@@ -55,47 +64,49 @@ fn render_balance(frame: &mut Frame, area: Rect, state: &UiState) {
         None => Line::from("USDC: --").alignment(Alignment::Center),
     };
 
-    let positions_line = positions_line(state);
+    let mut lines = vec![usdc_line];
+    lines.extend(position_lines(state));
 
-    let balance = Paragraph::new(vec![usdc_line, positions_line])
+    let balance = Paragraph::new(lines)
         .style(Style::default().add_modifier(Modifier::BOLD))
         .block(Block::default().borders(Borders::ALL).title("poly-tui"));
     frame.render_widget(balance, area);
 }
 
-/// Build the second line of the balance box.
+/// Build position lines for the balance box.
 ///
 /// States:
-/// - positions = None  -> "Loading positions..." (dim)
-/// - positions = Some(empty) -> "No open positions" (dim)
-/// - positions = Some(items) -> one line per item: "Holding: 10 UP @ $0.500  now $4.85 (-3%)"
-///
-/// When multiple positions, only the first is shown on this line; further
-/// positions overflow into additional lines (handled by the multi-line
-/// Paragraph in render_balance — extend balance area Constraint::Length if
-/// strategy 4 ever produces >1 simultaneous position).
-fn positions_line(state: &UiState) -> Line<'static> {
-    use rust_decimal::prelude::ToPrimitive;
+/// - positions = None             -> ["Loading positions..."] (dim)
+/// - positions = Some(empty)      -> ["No open positions"] (dim)
+/// - positions = Some(items)      -> one line per item, sorted by market_slug
+///   for stable order across fetches (data-api can shuffle them)
+fn position_lines(state: &UiState) -> Vec<Line<'static>> {
     let p = match &state.positions {
-        None => return Line::from(Span::styled(
+        None => return vec![Line::from(Span::styled(
             "Loading positions\u{2026}",
             Style::default().fg(Color::DarkGray),
-        )).alignment(Alignment::Center),
-        Some(p) if p.items.is_empty() => return Line::from(Span::styled(
+        )).alignment(Alignment::Center)],
+        Some(p) if p.items.is_empty() => return vec![Line::from(Span::styled(
             "No open positions",
             Style::default().fg(Color::DarkGray),
-        )).alignment(Alignment::Center),
+        )).alignment(Alignment::Center)],
         Some(p) => p,
     };
-    // Render the first position. (Multi-position rendering deferred — strategy
-    // 4 never holds more than one. Spec calls out this case but defers full
-    // multi-position layout to v1.7+.)
-    let first = &p.items[0];
-    let side = match first.side {
+
+    let mut items: Vec<&crate::positions::Position> = p.items.iter().collect();
+    items.sort_by(|a, b| a.market_slug.cmp(&b.market_slug));
+    items.into_iter().map(format_position_line).collect()
+}
+
+/// Format a single position into a Line. Public-ish (crate-internal) so tests
+/// can target it without the full ui plumbing.
+fn format_position_line(pos: &crate::positions::Position) -> Line<'static> {
+    use rust_decimal::prelude::ToPrimitive;
+    let side = match pos.side {
         crate::positions::Side::Up => "UP",
         crate::positions::Side::Down => "DOWN",
     };
-    let pct = first.pnl_pct();
+    let pct = pos.pnl_pct();
     let pct_int: i64 = pct.round().to_i64().unwrap_or(0);
     let (sign, color) = if pct_int > 0 {
         ("+", Color::Green)
@@ -105,13 +116,13 @@ fn positions_line(state: &UiState) -> Line<'static> {
         ("\u{00b1}", Color::White)
     };
     let pct_str = format!("{sign}{pct_int}%");
-    let cost_str = format!("${:.3}", first.avg_price.to_f64().unwrap_or(0.0));
-    let value_str = format!("${:.2}", first.value_usd().to_f64().unwrap_or(0.0));
+    let cost_str = format!("${:.3}", pos.avg_price.to_f64().unwrap_or(0.0));
+    let value_str = format!("${:.2}", pos.value_usd().to_f64().unwrap_or(0.0));
 
     let spans = vec![
         Span::raw(format!(
             "Holding: {} {} @ {}  now {} ",
-            first.shares, side, cost_str, value_str,
+            pos.shares, side, cost_str, value_str,
         )),
         Span::styled(format!("({pct_str})"), Style::default().fg(color)),
     ];
