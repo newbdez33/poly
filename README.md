@@ -139,6 +139,7 @@ See `TODO.md`. Highlights:
 - **v1.6** ✅ — TUI positions (live diagnostic of stuck shares)
 - **v1.7** ✅ — Maker mode (`--maker` limit-order entry + TP)
 - **v1.7.1** ✅ — `--window-minutes 5|15|60` flag (TUI auto-detects)
+- **v1.7.2** ✅ — Backtest oracle noise + SL parameter sweep
 - **v1.3** — daemon / TUI split. Required before any new trading logic (multi-strategy, dynamic config, etc.)
 - **v1.8+** — strategy selection driven by v1.4 backtest, markets, observability
 
@@ -158,6 +159,8 @@ See `TODO.md`. Highlights:
 - `docs/superpowers/plans/2026-05-10-tui-positions.md` — v1.6 plan
 - `docs/superpowers/specs/2026-05-10-window-minutes-design.md` — v1.7.1 design
 - `docs/superpowers/plans/2026-05-10-window-minutes.md` — v1.7.1 plan
+- `docs/superpowers/specs/2026-05-10-backtest-oracle-noise-design.md` — v1.7.2 design
+- `docs/superpowers/plans/2026-05-10-backtest-oracle-noise.md` — v1.7.2 plan
 - `TODO.md` — roadmap and v1.3 daemon split plan
 
 ## Trader
@@ -411,6 +414,28 @@ cargo test --test backtest_smoke -- --ignored
 See `docs/superpowers/specs/2026-05-09-backtest-framework-design.md` and
 `docs/superpowers/plans/2026-05-09-backtest-framework.md` for full design and
 task breakdown.
+
+### Oracle noise + SL parameter sweep (v1.7.2)
+
+Real-money observation: SL fired at bid=0.34 when configured threshold was 0.45 — the v1.4 BS oracle (Binance 1-min interp) underestimated intra-window jitter. v1.7.2 adds Gaussian white noise to the BS theoretical and 5 new SL sweep variants.
+
+```bash
+# Default — no noise, 11 strategies (was 6)
+poly-backtest --start 2026-04-09 --end 2026-05-09
+
+# Add σ=0.05 Gaussian noise on bid/ask, seeded for reproducibility
+poly-backtest --start 2026-04-09 --end 2026-05-09 \
+  --oracle-noise 0.05 --noise-seed 42
+```
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--oracle-noise` | `0.0` | Stddev of N(0, σ) added per-tick to bid/ask, clamped to [0.01, 0.99]. Range [0.0, 0.5]. |
+| `--noise-seed` | `42` | RNG seed. Same σ + seed = byte-identical run. |
+
+**Strategy sweep**: strategies 7-11 vary `sl_price ∈ {0.40, 0.35, 0.30, 0.25, 0.20}` with TP fixed at 0.85, mirroring the v1.5 trader's `--exit-rule tp-sl` parameters.
+
+**Calibration:** start with σ=0.0 (baseline), σ=0.03 (mild), σ=0.05 (matches today's observed gap-down). Re-run after collecting 24h of real-money trigger data and tune to match observed SL rate ±10%.
 
 ## License
 

@@ -1,6 +1,27 @@
 # Poly TUI — TODO / Roadmap
 
-## v1.7.2 — Extend backtest to 15m / 60m windows ⏳ TODO
+## v1.7.2 — Backtest oracle noise + SL sweep ✅ COMPLETE
+
+Adds `NoisyBlackScholesOracle` (Gaussian per-tick noise, seeded reproducibility) and 5 SL-sweep variants (TP=0.85, SL ∈ {0.40, 0.35, 0.30, 0.25, 0.20}) to the v1.4 backtest. Default `--oracle-noise 0.0` reproduces v1.4 numbers exactly. See `docs/superpowers/specs/2026-05-10-backtest-oracle-noise-design.md`.
+
+- [x] `rand` + `rand_distr` deps
+- [x] `NoisyBlackScholesOracle` wrapper with σ=0 fast path
+- [x] Non-zero noise: per-tick Gaussian sample + clamp [0.01, 0.99]
+- [x] Reproducibility (seeded `StdRng`)
+- [x] CLI: `--oracle-noise` + `--noise-seed`
+- [x] Validation in main: `oracle_noise ∈ [0.0, 0.5]`
+- [x] 5 new SL-sweep strategies (`7_tp85_sl40` ... `11_tp85_sl20`)
+- [x] Wire into poly-backtest binary
+- [x] README + TODO docs
+
+**Open items / next:**
+- Calibrate `--oracle-noise` from real-money trigger samples (operator task, ~24h)
+- v1.7.3: extend backtest to 15m/60m windows (still TODO from earlier)
+- v1.7.4: autocorrelated noise (AR(1)) if white-noise calibration insufficient
+
+---
+
+## v1.7.3 — Extend backtest to 15m / 60m windows ⏳ TODO
 
 **Trigger:** before any real-money run with `--window-minutes 15` or `60`. Strategy 4 was validated on 5m only; the probability-structure-invariance argument is theoretical.
 
