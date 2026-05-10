@@ -6,6 +6,7 @@ use crate::trader::executor::{compute_share_count, meets_minimum, FillResult, Or
 use crate::trader::exit_watcher::ExitConfig;
 use crate::trader::ladder::{Direction, LadderState, SkipReason, WindowOutcome};
 use crate::trader::market::{MarketDiscovery, WindowMarket};
+use crate::trader::order_events::OrderEventStream;
 use crate::trader::price::MidwindowPriceFetcher;
 use crate::trader::resolver::{Resolution, WindowResolver};
 use rust_decimal::Decimal;
@@ -17,12 +18,14 @@ pub struct WindowDeps {
     pub resolver: Arc<dyn WindowResolver>,
     pub emitter: Arc<dyn TraderEventEmitter>,
     pub price: Arc<dyn MidwindowPriceFetcher>,
+    pub events: Arc<dyn OrderEventStream>,
 }
 
 pub struct WindowConfig {
     pub band_min: Decimal,
     pub band_max: Decimal,
     pub exit: Option<ExitConfig>,
+    pub maker: bool,
 }
 
 /// Execute one 5-min window. Returns the WindowOutcome the FSM consumes.
@@ -68,9 +71,27 @@ pub async fn run_window(
         decision: EntryDecision::Enter { ask },
     }).await;
 
-    // Step 3: FoK buy
+    // Step 3: Buy. Maker mode places its own limit buy inside run_maker; only
+    // the taker path does the FoK here.
     let dollars = ladder.current_bet_usd();
     let token_id = market.token_id_for(ladder.direction).to_string();
+
+    if cfg.maker && cfg.exit.is_some() {
+        // Maker path takes over from here — no FoK.
+        let exit_cfg = cfg.exit.as_ref().unwrap();
+        let maker_deps = crate::trader::maker::MakerDeps {
+            executor: deps.executor.clone(),
+            events: deps.events.clone(),
+            price: deps.price.clone(),
+            emitter: deps.emitter.clone(),
+        };
+        return crate::trader::maker::run_maker(
+            &maker_deps, ladder, &market, &token_id, dollars, ask, exit_cfg, window_ts,
+            tokio_util::sync::CancellationToken::new(),
+        ).await;
+    }
+
+    // Taker path (existing v1.5/v1.6 behaviour) — unchanged below.
     let shares_needed = compute_share_count(dollars, ask);
     if !meets_minimum(shares_needed) {
         emit_kind(deps, ladder, TraderEventKind::OrderRejected {
@@ -264,7 +285,7 @@ mod tests {
     use super::*;
     use crate::trader::errors::EmitError;
     use crate::trader::event::TraderEvent;
-    use crate::trader::executor::FillResult;
+    use crate::trader::executor::{FillResult, OrderId};
     use crate::trader::resolver::Resolution;
     use async_trait::async_trait;
     use crate::trader::exit_watcher::{ExitConfig, ExitKind};
@@ -387,11 +408,16 @@ mod tests {
         Arc::new(crate::trader::price::tests::StubPriceFetcher::new(q))
     }
 
+    fn stub_events() -> Arc<crate::trader::order_events::tests::ScriptedOrderEvents> {
+        crate::trader::order_events::tests::ScriptedOrderEvents::new()
+    }
+
     fn cfg() -> WindowConfig {
         WindowConfig {
             band_min: Decimal::from_str("0.45").unwrap(),
             band_max: Decimal::from_str("0.55").unwrap(),
             exit: None,
+            maker: false,
         }
     }
 
@@ -400,6 +426,7 @@ mod tests {
             band_min: Decimal::from_str("0.45").unwrap(),
             band_max: Decimal::from_str("0.55").unwrap(),
             exit: Some(exit),
+            maker: false,
         }
     }
 
@@ -431,6 +458,7 @@ mod tests {
             resolver: StubResolver::won(Direction::Up),
             emitter: emitter.clone(),
             price: stub_price("0.50"),
+            events: stub_events(),
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome,
@@ -451,6 +479,7 @@ mod tests {
             resolver: StubResolver::won(Direction::Down),
             emitter: CapturingEmitter::new(),
             price: stub_price("0.50"),
+            events: stub_events(),
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome,
@@ -466,6 +495,7 @@ mod tests {
             resolver: StubResolver::timeout(),
             emitter: CapturingEmitter::new(),
             price: stub_price("0.50"),
+            events: stub_events(),
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome, WindowOutcome::Skipped { reason: SkipReason::MarketNotFound }));
@@ -479,6 +509,7 @@ mod tests {
             resolver: StubResolver::timeout(),
             emitter: CapturingEmitter::new(),
             price: stub_price("0.50"),
+            events: stub_events(),
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome,
@@ -495,6 +526,7 @@ mod tests {
             resolver: StubResolver::timeout(),
             emitter: CapturingEmitter::new(),
             price: stub_price("0.50"),
+            events: stub_events(),
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome,
@@ -511,6 +543,7 @@ mod tests {
             resolver: StubResolver::timeout(),
             emitter: CapturingEmitter::new(),
             price: stub_price("0.50"),
+            events: stub_events(),
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome,
@@ -531,6 +564,7 @@ mod tests {
             resolver: StubResolver::timeout(),
             emitter: CapturingEmitter::new(),
             price: stub_price("0.50"),
+            events: stub_events(),
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome,
@@ -555,6 +589,7 @@ mod tests {
             resolver: StubResolver::won(Direction::Up),
             emitter: emitter.clone(),
             price: stub_price("0.50"),
+            events: stub_events(),
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome, WindowOutcome::Won { ref proceeds_usd } if *proceeds_usd == Decimal::ZERO));
@@ -585,6 +620,7 @@ mod tests {
             resolver: StubResolver::won(Direction::Up),
             emitter: emitter.clone(),
             price: stub_price("0.50"),
+            events: stub_events(),
         };
         run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         let kinds = emitter.kinds();
@@ -654,6 +690,7 @@ mod tests {
             resolver: Arc::new(NeverResolver),
             emitter: emitter.clone(),
             price: scripted_price(vec!["0.55", "0.70", "0.86"]),
+            events: stub_events(),
         };
         let cfg = cfg_with_exit(ExitConfig {
             tp_price: Decimal::from_str("0.85").unwrap(),
@@ -692,6 +729,7 @@ mod tests {
             resolver: Arc::new(NeverResolver),
             emitter: emitter.clone(),
             price: scripted_price(vec!["0.50", "0.45"]),
+            events: stub_events(),
         };
         let cfg = cfg_with_exit(ExitConfig {
             tp_price: Decimal::from_str("0.85").unwrap(),
@@ -728,6 +766,7 @@ mod tests {
             emitter: emitter.clone(),
             // price stub never triggers; should not be polled because deadline is in the past.
             price: stub_price("0.50"),
+            events: stub_events(),
         };
         let cfg = cfg_with_exit(ExitConfig {
             tp_price: Decimal::from_str("0.85").unwrap(),
@@ -766,6 +805,7 @@ mod tests {
             resolver: StubResolver::won(Direction::Up),
             emitter: emitter.clone(),
             price: stub_price("0.50"),
+            events: stub_events(),
         };
         let cfg = cfg_with_exit(ExitConfig {
             tp_price: Decimal::from_str("0.85").unwrap(),
@@ -780,5 +820,60 @@ mod tests {
                 "no exit-triggered event when deadline path fires");
         assert!(kinds.iter().any(|k| matches!(k, TraderEventKind::Resolved { .. })),
                 "resolved event when deadline path fires");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn maker_flag_routes_to_run_maker() {
+        // Smoke: with cfg.maker=true and a stub fill, run_window dispatches
+        // to maker.rs which posts a BuyLimitPosted event (taker path doesn't).
+        let market = open_market_at("0.50", "0.50");
+        let emitter = CapturingEmitter::new();
+        let exec = crate::trader::adapters::simulated_executor::SimulatedExecutor::default();
+
+        // Build a price stub that returns >SL forever (no SL trigger).
+        let price = stub_price("0.50");
+
+        let events = crate::trader::order_events::tests::ScriptedOrderEvents::new();
+        // Pre-script: buy "sim-order-0" fills at 0.49, tp "sim-order-1" fills at 0.85.
+        events.add(OrderId("sim-order-0".into()), vec![
+            crate::trader::order_events::OrderEvent::Filled {
+                id: OrderId("sim-order-0".into()),
+                fill_price: Decimal::from_str("0.49").unwrap(),
+                shares_filled: Decimal::from(10),
+                total_shares: Decimal::from(10),
+            },
+        ]);
+        events.add(OrderId("sim-order-1".into()), vec![
+            crate::trader::order_events::OrderEvent::Filled {
+                id: OrderId("sim-order-1".into()),
+                fill_price: Decimal::from_str("0.85").unwrap(),
+                shares_filled: Decimal::from(10),
+                total_shares: Decimal::from(10),
+            },
+        ]);
+
+        let deps = WindowDeps {
+            market: StubMarket::ok(market),
+            executor: Arc::new(exec),
+            resolver: StubResolver::won(Direction::Up),
+            emitter: emitter.clone(),
+            price,
+            events: events as Arc<dyn crate::trader::order_events::OrderEventStream>,
+        };
+        let cfg = WindowConfig {
+            band_min: Decimal::from_str("0.45").unwrap(),
+            band_max: Decimal::from_str("0.55").unwrap(),
+            exit: Some(ExitConfig {
+                tp_price: Decimal::from_str("0.85").unwrap(),
+                sl_price: Decimal::from_str("0.45").unwrap(),
+                poll: std::time::Duration::from_millis(50),
+            }),
+            maker: true,
+        };
+        let _outcome = run_window(&deps, &cfg, &fresh_ladder(), chrono::Utc::now().timestamp()).await;
+
+        let kinds = emitter.kinds();
+        assert!(kinds.iter().any(|k| matches!(k, TraderEventKind::BuyLimitPosted { .. })),
+                "maker route must emit BuyLimitPosted; events: {kinds:?}");
     }
 }
