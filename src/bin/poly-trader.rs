@@ -61,10 +61,14 @@ async fn main() -> Result<()> {
         Arc::new(PolymarketResolver::new(market.clone(), Duration::from_secs(600)));
 
     let (executor, events): (Arc<dyn OrderExecutor>, Arc<dyn OrderEventStream>) = if args.dry_run {
-        (
-            Arc::new(SimulatedExecutor::default()),
-            Arc::new(AutoFillEvents),
-        )
+        // Pair SimulatedExecutor + SimulatedOrderEvents: the events stream
+        // reads the executor's recorded limit orders and fills at their actual
+        // limit price (not a hardcoded 0.50).
+        let sim = Arc::new(SimulatedExecutor::default());
+        let sim_events = Arc::new(
+            poly_tui::trader::adapters::simulated_executor::SimulatedOrderEvents::new(sim.clone())
+        );
+        (sim as Arc<dyn OrderExecutor>, sim_events as Arc<dyn OrderEventStream>)
     } else {
         // Real CLOB: keep the executor's auth'd client and reuse it for the
         // OrderEventStream poller. v1.7 simplification — v1.7.1 may refactor
@@ -183,33 +187,6 @@ impl WindowExecutor for BoundWindowExec {
     }
 }
 
-/// Dry-run OrderEventStream: any watched order id immediately receives a
-/// Filled event matching its full size at $0.50 buy / $0.85 sell.
-/// Crude but adequate for state-machine validation in --dry-run mode.
-struct AutoFillEvents;
-
-#[async_trait::async_trait]
-impl OrderEventStream for AutoFillEvents {
-    async fn watch(&self, id: poly_tui::trader::executor::OrderId)
-        -> Result<tokio::sync::mpsc::Receiver<poly_tui::trader::order_events::OrderEvent>,
-                  poly_tui::trader::errors::StreamError>
-    {
-        let (tx, rx) = tokio::sync::mpsc::channel(2);
-        tokio::spawn(async move {
-            // Yield once so the caller can finish posting before we "fill".
-            tokio::task::yield_now().await;
-            let _ = tx.send(poly_tui::trader::order_events::OrderEvent::Filled {
-                id: id.clone(),
-                // The actual fill price is irrelevant for dry-run; run_maker
-                // uses the limit price from its own state, not from this event.
-                fill_price: rust_decimal::Decimal::from_str("0.50").unwrap(),
-                shares_filled: rust_decimal::Decimal::from(10),
-                total_shares: rust_decimal::Decimal::from(10),
-            }).await;
-        });
-        Ok(rx)
-    }
-}
 
 async fn restore_or_init(
     store: &dyn TraderStateStore,

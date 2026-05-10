@@ -1,16 +1,32 @@
 use crate::trader::errors::ExecError;
-use crate::trader::executor::{compute_share_count, FillResult, OrderExecutor};
+use crate::trader::executor::{compute_share_count, FillResult, OrderExecutor, OrderId, OrderSide};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
+use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Per-order metadata recorded by `place_limit` and consumed by
+/// `SimulatedOrderEvents` to fill at the correct limit price.
+#[derive(Clone, Debug)]
+pub struct LimitOrderInfo {
+    pub side: OrderSide,
+    pub price: Decimal,
+    pub shares: Decimal,
+}
 
 /// Dry-run executor: simulates fills without touching CLOB. Default fill price
 /// $0.50 for buys, $0.99 for sells.
+///
+/// For maker-mode dry-run, `place_limit` records the order's `(side, price,
+/// shares)` so a paired `SimulatedOrderEvents` can return Filled events at
+/// the actual limit price (not a hardcoded value).
 pub struct SimulatedExecutor {
     buy_price: Decimal,
     sell_price: Decimal,
     order_counter: AtomicU64,
+    limits: Mutex<HashMap<OrderId, LimitOrderInfo>>,
 }
 
 impl Default for SimulatedExecutor {
@@ -19,6 +35,7 @@ impl Default for SimulatedExecutor {
             buy_price: Decimal::from_str("0.50").unwrap(),
             sell_price: Decimal::from_str("0.99").unwrap(),
             order_counter: AtomicU64::new(0),
+            limits: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -26,7 +43,18 @@ impl Default for SimulatedExecutor {
 impl SimulatedExecutor {
     pub fn new() -> Self { Self::default() }
     pub fn with_prices(buy: Decimal, sell: Decimal) -> Self {
-        Self { buy_price: buy, sell_price: sell, order_counter: AtomicU64::new(0) }
+        Self {
+            buy_price: buy,
+            sell_price: sell,
+            order_counter: AtomicU64::new(0),
+            limits: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Look up the limit order metadata recorded by a previous `place_limit`.
+    /// Used by `SimulatedOrderEvents` to fill at the correct price.
+    pub fn limit_order_info(&self, id: &OrderId) -> Option<LimitOrderInfo> {
+        self.limits.lock().unwrap().get(id).cloned()
     }
 }
 
@@ -59,19 +87,73 @@ impl OrderExecutor for SimulatedExecutor {
     async fn place_limit(
         &self,
         _token_id: &str,
-        _side: crate::trader::executor::OrderSide,
-        _price: Decimal,
-        _shares: Decimal,
-    ) -> Result<crate::trader::executor::OrderId, ExecError> {
+        side: OrderSide,
+        price: Decimal,
+        shares: Decimal,
+    ) -> Result<OrderId, ExecError> {
         let n = self.order_counter.fetch_add(1, Ordering::SeqCst);
-        Ok(crate::trader::executor::OrderId(format!("sim-order-{n}")))
+        let id = OrderId(format!("sim-order-{n}"));
+        self.limits.lock().unwrap().insert(
+            id.clone(),
+            LimitOrderInfo { side, price, shares },
+        );
+        Ok(id)
     }
 
     async fn cancel(
         &self,
-        _order_id: &crate::trader::executor::OrderId,
+        order_id: &OrderId,
     ) -> Result<(), ExecError> {
+        self.limits.lock().unwrap().remove(order_id);
         Ok(())
+    }
+}
+
+/// Pair to `SimulatedExecutor` — fills any watched order at the limit price
+/// recorded when `place_limit` was called. Used by dry-run mode to drive
+/// `run_maker` through full state transitions with realistic fill prices.
+pub struct SimulatedOrderEvents {
+    executor: std::sync::Arc<SimulatedExecutor>,
+}
+
+impl SimulatedOrderEvents {
+    pub fn new(executor: std::sync::Arc<SimulatedExecutor>) -> Self {
+        Self { executor }
+    }
+}
+
+#[async_trait]
+impl crate::trader::order_events::OrderEventStream for SimulatedOrderEvents {
+    async fn watch(
+        &self,
+        id: OrderId,
+    ) -> Result<tokio::sync::mpsc::Receiver<crate::trader::order_events::OrderEvent>,
+                crate::trader::errors::StreamError>
+    {
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        let info = self.executor.limit_order_info(&id);
+        tokio::spawn(async move {
+            // Yield once so the caller can subscribe before we fill.
+            tokio::task::yield_now().await;
+            match info {
+                Some(info) => {
+                    let _ = tx.send(crate::trader::order_events::OrderEvent::Filled {
+                        id: id.clone(),
+                        fill_price: info.price,
+                        shares_filled: info.shares,
+                        total_shares: info.shares,
+                    }).await;
+                }
+                None => {
+                    // Order ID not recognized — emit Cancelled so the watcher
+                    // breaks out of its select! arm cleanly.
+                    let _ = tx.send(crate::trader::order_events::OrderEvent::Cancelled {
+                        id: id.clone(),
+                    }).await;
+                }
+            }
+        });
+        Ok(rx)
     }
 }
 
