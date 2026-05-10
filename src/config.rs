@@ -27,7 +27,25 @@ fn default_polygon_rpc_url() -> String { "https://polygon-rpc.com".to_string() }
 impl Config {
     /// Load from process environment (caller is expected to have run `dotenvy::dotenv()` first).
     pub fn from_env() -> Result<Self, envy::Error> {
-        envy::from_env::<Config>()
+        let cfg: Config = envy::from_env()?;
+        cfg.validate_clob_host()?;
+        Ok(cfg)
+    }
+
+    /// Hard-fail at startup if `CLOB_HOST` points at the retired `clob-v2` host.
+    /// reqwest downgrades POST→GET on 301 follow → /order returns 405 silently.
+    /// We've been bitten once; better to refuse to start than surface as
+    /// "every order rejected with no real explanation".
+    fn validate_clob_host(&self) -> Result<(), envy::Error> {
+        if self.clob_host.contains("clob-v2.polymarket.com") {
+            return Err(envy::Error::Custom(format!(
+                "CLOB_HOST points at retired host '{}' — Polymarket 301-redirects v2 \
+                 to clob.polymarket.com and POST→GET downgrade returns HTTP 405. \
+                 Update CLOB_HOST to https://clob.polymarket.com",
+                self.clob_host
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -53,6 +71,36 @@ mod tests {
                 None => unsafe { std::env::remove_var(&k) },
             }
         }
+    }
+
+    #[test]
+    fn validate_clob_host_rejects_retired_v2() {
+        // Test the validator directly to avoid env-var leakage with parallel tests.
+        let cfg = Config {
+            polymarket_private_key: "0xabc".into(),
+            redis_url: "redis://x".into(),
+            refresh_interval_secs: 30,
+            clob_host: "https://clob-v2.polymarket.com".into(),
+            log_level: "info".into(),
+            polygon_rpc_url: "https://polygon-rpc.com".into(),
+        };
+        let err = cfg.validate_clob_host().unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("clob-v2"), "actual: {msg}");
+        assert!(msg.contains("clob.polymarket.com"), "actual: {msg}");
+    }
+
+    #[test]
+    fn validate_clob_host_accepts_canonical() {
+        let cfg = Config {
+            polymarket_private_key: "0xabc".into(),
+            redis_url: "redis://x".into(),
+            refresh_interval_secs: 30,
+            clob_host: "https://clob.polymarket.com".into(),
+            log_level: "info".into(),
+            polygon_rpc_url: "https://polygon-rpc.com".into(),
+        };
+        assert!(cfg.validate_clob_host().is_ok());
     }
 
     #[test]
