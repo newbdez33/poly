@@ -1,5 +1,27 @@
 # Poly TUI — TODO / Roadmap
 
+## v1.7.2 — Extend backtest to 15m / 60m windows ⏳ TODO
+
+**Trigger:** before any real-money run with `--window-minutes 15` or `60`. Strategy 4 was validated on 5m only; the probability-structure-invariance argument is theoretical.
+
+**Goal:** Add `--window-minutes 5|15|60` flag to `poly-backtest` (mirroring v1.7.1 trader change). Re-run the 6-strategy backtest on 15m data for the same 3 samples (Apr-May, Mar, Feb) and confirm strategy 4 EV is positive.
+
+**Scope:**
+- [ ] `src/bin/poly-backtest.rs` — add `--window-minutes` flag
+- [ ] `src/backtest/data/gamma_history.rs` — fetch slugs use `window_slug(ts, mins)`; iterate at the right boundary cadence
+- [ ] `src/backtest/oracle.rs` — sigma estimation works with 15m / 60m bars (1-min Binance data still fine)
+- [ ] `src/backtest/data/loader.rs` — verify per-second simulation horizon scales
+- [ ] Run 3-sample 30-day backtest on 15m → produce `backtest-report-15m-*.html`
+- [ ] Run 3-sample 30-day backtest on 60m → produce `backtest-report-60m-*.html` (if signal looks good on 15m)
+- [ ] Compare strategy 4 EV / win rate / cap-reset rate across 5m / 15m / 60m
+- [ ] Decision: if 15m EV ≥ 5m EV (in $/hr or % of stake), go live; else stay on 5m
+
+Estimated work: 2–3 hours including data fetch + report inspection.
+
+---
+
+
+
 ## v1.0 — TUI Starter（当前阶段，方案 1）
 
 **目标：** 单二进制 TUI，显示 Polymarket USDC 余额，跑通 Rust + ratatui + rs-clob-client + Redis 全链路；BDD/TDD/E2E 测试就位。
