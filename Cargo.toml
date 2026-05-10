@@ -111,3 +111,7 @@ path = "tests/backtest_smoke.rs"
 [[test]]
 name = "positions_integration"
 path = "tests/positions_integration.rs"
+
+[[test]]
+name = "maker_integration"
+path = "tests/maker_integration.rs"
