@@ -59,6 +59,18 @@ pub fn simulate_window(
                     WindowOutcome::Lost { spent_usd: dollars_spent - proceeds }
                 };
             }
+            ExitRule::TpOnlyOrEarlyExit { tp_price, exit_at_secs } => {
+                if bid >= *tp_price {
+                    return WindowOutcome::Won { proceeds_usd: proceeds };
+                }
+                if t >= *exit_at_secs {
+                    return if proceeds > dollars_spent {
+                        WindowOutcome::Won { proceeds_usd: proceeds }
+                    } else {
+                        WindowOutcome::Lost { spent_usd: dollars_spent - proceeds }
+                    };
+                }
+            }
             _ => {}
         }
     }
@@ -257,5 +269,88 @@ mod tests {
             &oracle, dec!(5)
         );
         assert!(matches!(outcome, WindowOutcome::Won { .. }));
+    }
+
+    #[test]
+    fn tp_only_or_early_exit_fills_at_tp_before_exit_time() {
+        // ask=0.50 at t=0; from t=1 onwards bid=0.80 → TP=0.75 triggers immediately
+        let mut prices = vec![(dec!(0.50), dec!(0.50))];
+        prices.extend(std::iter::repeat((dec!(0.80), dec!(0.80))).take(300));
+        let oracle = StubOracle { prices };
+        let outcome = simulate_window(
+            &make_window(Direction::Down), // even with Down winner, TP triggers first
+            &config_with_exit(ExitRule::TpOnlyOrEarlyExit {
+                tp_price: dec!(0.75), exit_at_secs: 270
+            }),
+            &oracle, dec!(5),
+        );
+        assert!(matches!(outcome, WindowOutcome::Won { .. }));
+    }
+
+    #[test]
+    fn tp_only_or_early_exit_falls_through_to_market_sell_when_no_tp() {
+        // ask=0.50 at t=0, bid stays 0.50 forever → TP never hits.
+        // At t=270s, market-sell at 0.50: proceeds = 10 × 0.50 = 5.00 == cost → break-even.
+        // Per the >cost branch: proceeds (5.00) is NOT > cost (5.00) → Lost { spent_usd: 0 }.
+        let oracle = flat_window("0.50");
+        let outcome = simulate_window(
+            &make_window(Direction::Up),
+            &config_with_exit(ExitRule::TpOnlyOrEarlyExit {
+                tp_price: dec!(0.75), exit_at_secs: 270
+            }),
+            &oracle, dec!(5),
+        );
+        match outcome {
+            WindowOutcome::Lost { spent_usd } => {
+                assert_eq!(spent_usd, dec!(0));
+            }
+            _ => panic!("expected Lost (break-even = no profit), got {outcome:?}"),
+        }
+    }
+
+    #[test]
+    fn tp_only_or_early_exit_falls_through_to_loss() {
+        // ask=0.50 entry, bid drifts to 0.40 → no TP, exit at 270s with loss
+        let mut prices = vec![(dec!(0.50), dec!(0.50))];
+        prices.extend(std::iter::repeat((dec!(0.40), dec!(0.40))).take(300));
+        let oracle = StubOracle { prices };
+        let outcome = simulate_window(
+            &make_window(Direction::Up),
+            &config_with_exit(ExitRule::TpOnlyOrEarlyExit {
+                tp_price: dec!(0.75), exit_at_secs: 270
+            }),
+            &oracle, dec!(5),
+        );
+        match outcome {
+            WindowOutcome::Lost { spent_usd } => {
+                // 10 shares × (0.50 - 0.40) = 1.00 net loss
+                assert!(spent_usd >= dec!(0.95) && spent_usd <= dec!(1.05),
+                        "spent_usd={spent_usd}");
+            }
+            _ => panic!("expected Lost, got {outcome:?}"),
+        }
+    }
+
+    #[test]
+    fn tp_only_or_early_exit_falls_through_to_profit() {
+        // ask=0.50 entry, bid drifts to 0.60 → no TP at 0.75, but exit at 270s with profit
+        let mut prices = vec![(dec!(0.50), dec!(0.50))];
+        prices.extend(std::iter::repeat((dec!(0.60), dec!(0.60))).take(300));
+        let oracle = StubOracle { prices };
+        let outcome = simulate_window(
+            &make_window(Direction::Down), // direction irrelevant: we exit early
+            &config_with_exit(ExitRule::TpOnlyOrEarlyExit {
+                tp_price: dec!(0.75), exit_at_secs: 270
+            }),
+            &oracle, dec!(5),
+        );
+        match outcome {
+            WindowOutcome::Won { proceeds_usd } => {
+                // 10 shares × 0.60 = 6.00
+                assert!(proceeds_usd >= dec!(5.95) && proceeds_usd <= dec!(6.05),
+                        "proceeds_usd={proceeds_usd}");
+            }
+            _ => panic!("expected Won, got {outcome:?}"),
+        }
     }
 }

@@ -58,6 +58,9 @@ pub enum ExitRule {
     TpOnlyOrHold { tp_price: Decimal },
     TpSlOrHold { tp_price: Decimal, sl_price: Decimal },
     FixedTime { seconds: u32 },
+    /// v1.7.5: Try TP at `tp_price`; if not filled by `exit_at_secs`,
+    /// market-sell at the current bid. Avoids resolution path entirely.
+    TpOnlyOrEarlyExit { tp_price: Decimal, exit_at_secs: u32 },
 }
 
 #[derive(Clone, Debug)]
