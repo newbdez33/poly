@@ -14,10 +14,69 @@ Adds `NoisyBlackScholesOracle` (Gaussian per-tick noise, seeded reproducibility)
 - [x] Wire into poly-backtest binary
 - [x] README + TODO docs
 
+### 🚨 Findings — strategy 4 is fragile under noise
+
+Sweep results (Apr-May, 8509 windows, σ ∈ {0.0, 0.03, 0.05, 0.08}):
+
+**Strategy 4 (TP=0.85, SL=0.45) PnL collapse:**
+
+| σ | PnL | Win rate | Cap resets |
+|---|---:|---:|---:|
+| 0.00 | **+$5,088** | 29.2% | 179 |
+| 0.03 | −$2,621 | 15.4% | 340 |
+| 0.05 | −$9,638 | 6.4% | 453 |
+| 0.08 | −$16,475 | 2.7% | 499 |
+
+**Best strategy at each noise level:**
+
+| σ | Winner | PnL |
+|---|---|---:|
+| 0.00 | `4_tp_sl_asymmetric` | +$5,088 |
+| 0.03 | `9_tp85_sl30` | +$637 |
+| 0.05 | **`1_hold_martingale`** | +$1,309 |
+| 0.08 | **`2_tp_only_martingale`** | +$1,537 |
+
+**SL sweep at σ=0:** lower SL strictly worse (SL=0.20 → −$519). Under noise, intermediate SL is least bad but no variant profits.
+
+### Key insights
+
+1. **Strategy 4 was a noise-free artifact.** The +$7.5K/30d we saw across 3 historical samples assumed perfect oracle. Once σ ≥ 0.03, it's deeply unprofitable.
+2. **SL is a noise amplifier.** Every minor jitter triggers SL → Martingale doubles → cap reached → repeat.
+3. **Holding (no SL) survives noise.** `1_hold_martingale` is the only consistent profit center at σ=0.05.
+4. **TP-only beats hold under aggressive noise.** `2_tp_only_martingale` lets winners run, ignores noise; turns +$1,537 at σ=0.08 (only profitable strategy at that level).
+
+### Operator decision
+
+**Strategy 4 with `--maker --exit-rule tp-sl` is dead unless real σ < 0.03.** Today's one observation suggested σ ≈ 0.06 (bid 0.34 vs BS theoretical ~0.40). If validated by 24h+ of real-money data:
+
+- Drop `--exit-rule tp-sl` for now
+- Switch trader to `--exit-rule hold` (default, no TP/SL) → 1_hold_martingale behavior
+- Consider implementing `--exit-rule tp-only` (2_tp_only_martingale; new code, similar effort to v1.5)
+
 **Open items / next:**
-- Calibrate `--oracle-noise` from real-money trigger samples (operator task, ~24h)
-- v1.7.3: extend backtest to 15m/60m windows (still TODO from earlier)
+- Replicate the σ-sweep on Mar and Feb samples to confirm collapse isn't sample-specific
+- v1.7.3: extend backtest to 15m/60m windows (separate)
 - v1.7.4: autocorrelated noise (AR(1)) if white-noise calibration insufficient
+- v1.8: implement `--exit-rule tp-only` in trader (just remove SL branch from existing tp-sl path)
+
+Reports saved at: `report-noise-0.html`, `report-noise-3.html`, `report-noise-5.html`, `report-noise-8.html`
+
+---
+
+## v1.8 — `--exit-rule tp-only` trader candidate ⏳ TODO
+
+**Trigger:** if real-money σ-calibration confirms σ ≥ 0.03 (strategy 4 dead) AND `2_tp_only_martingale` survives noise across multiple historical samples.
+
+**Goal:** Add `tp-only` to trader's existing `--exit-rule {hold|tp-sl}` enum. New variant: place limit BUY at entry, place limit TP at `--tp-price` (e.g., 0.75 from `2_tp_only_martingale`), no SL — hold to resolution if TP doesn't fire. Maker mode applies (limit BUY + limit TP).
+
+**Scope:**
+- [ ] `src/trader/config.rs` — extend `ExitRuleArg` enum with `TpOnly`. Validate `tp-only` requires `--tp-price` only (no `--sl-price`).
+- [ ] `src/trader/maker.rs` — fork `sell_with_tp_sl` into `sell_with_tp_only`: same TP limit logic, no SL price-watch arm. Falls through to resolution path on TP miss.
+- [ ] `src/trader/window.rs` — dispatch `tp-only` → `run_maker_tp_only` (new) or extend run_maker with optional SL.
+- [ ] Test: TP fills → Won. TP doesn't fire → resolver winner-sweep (existing path).
+- [ ] Real-money A/B test `tp-only` vs `hold` under same window count.
+
+Estimated work: ~1.5 hours (smaller than v1.7 since reuses most of maker mode infrastructure).
 
 ---
 
