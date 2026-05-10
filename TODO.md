@@ -113,9 +113,35 @@ Strategy 4 (validated by backtest +$5K-$10K/30d) lives behind `--exit-rule tp-sl
 - [x] `MidwindowPriceFetcher` trait + `GammaPriceFetcher` adapter
 - [x] `ExitWatcher` polling loop, `ExitConfig`, `ExitTrigger`, `ExitKind`
 - [x] `run_window` branches on `cfg.exit`, races watcher vs resolver via `tokio::select!`
-- [x] `TraderEventKind::ExitTriggered { kind, bid, proceeds_usd }`
+- [x] `TraderEventKind::ExitTriggered { kind, bid }` (proceeds_usd stripped — emitted before sell per spec)
 - [x] Outcome mapped from `proceeds vs cost`; ladder math unchanged
 - [x] E2E: `ExitTriggered` round-trips through Redis stream
+- [x] Code-review fixes: deadline aligned to `window_ts + 300s` (not buy-fill instant); `winner_sweep` extracted; gamma string-fallback for `priceToBeat`
+- [x] `SimulatedExecutor.sell_at_bid(bid_hint)` for realistic dry-run PnL — fills at `bid × 0.99` instead of hardcoded `$0.99/share`
+- [x] TUI strip: snapshot Chainlink at window-open as price-to-beat (gamma's `priceToBeat` is post-close only)
+- [x] TUI strip: 2-cell padding after clock emoji (`U+23F1`)
+
+### Dry-run validation results (2026-05-10)
+
+| Run | Windows | W/L/Skip | PnL | Notes |
+|---|---:|---|---:|---|
+| Smoke (--max-windows 2) | 2 | 0/2/0 | -$10 | Both SL-triggered, simulator returned hardcoded $9.90 → masked real loss. Triggered the simulator fix. |
+| Short (--max-windows 12) | 12 | 5/6/1 | +$34.24 | Simulator fix landed; PnL realistic. TP@0.985 single-window +$38 recovered 3 losses. |
+| Extended (--max-windows 288) | 22 | 7/15/0 | -$13.76 (CapReached) | Hit step-5 cap at hour 2.3. Strategy 4's fat-tail risk in action — backtest predicted ~3% cap-rate. |
+
+Trigger distribution across the three runs (n=36) tracked toward backtest predictions:
+
+| Type | Live (n=36) | Backtest (n=8509) |
+|---|---:|---:|
+| TP triggered | ~22% | 29% |
+| SL triggered | ~50% | 58% |
+| Resolved (deadline) | ~28% | 13% |
+
+Resolution rate is high vs backtest — consistent with this week's lower BTC vol. Still small sample.
+
+### Real-money launch (in progress)
+
+First real CLOB run: `--max-windows 12 --max-step 5 --exit-rule tp-sl --tp-price 0.85 --sl-price 0.45 --reset` — see Redis stream `poly:prod:trader:events` for live events. Monitor for `Alert` and `SellRejected` — stuck shares need manual reconciliation.
 
 ---
 

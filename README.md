@@ -201,6 +201,31 @@ Backtest distribution: ~29% TP, ~58% SL, ~13% deadline fall-through. If your liv
 
 **Fall back to v1.1:** omit `--exit-rule` (or pass `--exit-rule hold`). No state migration needed; the ladder is mode-agnostic.
 
+### Dry-run vs real-money differences
+
+Dry-run uses `SimulatedExecutor` with these approximations vs the real CLOB:
+
+| Aspect | Dry-run | Real CLOB |
+|---|---|---|
+| Buy fill price | Hard-coded `$0.50` | Actual best-ask at request time |
+| Sell on TP/SL trigger | `bid_hint × 0.99` (1% slippage) | Crosses spread; deeper books at high stakes can slip 5–10% |
+| Polymarket taker fee | Lumped into the 1% slippage | Separate ~1% taker fee on each market sell |
+| Buy/sell rejection | Never fails | `FoK rejected` on thin liquidity → window skipped |
+| Gas (Polygon) | Zero | ~$0.001 per order |
+| Execution latency | Immediate | 200–500ms REST round-trip; price can drift between trigger detection and fill |
+
+Net effect: real PnL is typically 5–15% lower than dry-run for the same window outcomes. Plan for the gap before scaling up.
+
+### First real-money run checklist
+
+Before dropping `--dry-run`:
+
+1. Wallet has at least `(base × 2^max_step)` USDC available — for `base=5 max_step=5`, that's $155 single-session cap.
+2. Run `--dry-run --max-windows 12` first to verify event flow and that trigger distribution is in the ballpark of backtest (~29% TP / 58% SL / 13% resolution).
+3. Start real money with `--max-windows 12` (1hr) to compare real fills vs dry-run for a small sample.
+4. Watch for `Alert` events in Redis stream — they indicate stuck shares that need manual reconciliation. Stop the trader if any fire.
+5. After 1hr looks clean, drop `--max-windows` to run continuously.
+
 ### Stop / resume
 
 ```bash
