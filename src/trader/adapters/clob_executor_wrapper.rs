@@ -161,8 +161,20 @@ impl OrderExecutor for ClobOrderExecutor {
         let tid = U256::from_str(token_id)
             .map_err(|e| ExecError::Decode(format!("invalid token_id '{token_id}': {e}")))?;
 
-        let amount = Amount::shares(shares)
-            .map_err(|e| ExecError::Decode(format!("invalid share amount {shares}: {e}")))?;
+        // Polymarket CLOB requires share amounts with at most 2 decimals
+        // (SDK's `LOT_SIZE_SCALE = 2`). Real BUY fills come back with up to 6
+        // decimals (e.g. 9.259258), so we must truncate before submitting the
+        // SELL. Truncation (not rounding) ensures we never try to sell more
+        // shares than we hold; the rounded-off fraction (~$0.001 typical) is
+        // intentionally stuck and reclaimable on resolution.
+        let sellable = shares.trunc_with_scale(2);
+        if sellable.is_zero() {
+            return Err(ExecError::Decode(format!(
+                "share amount {shares} truncates to 0 — too small to sell"
+            )));
+        }
+        let amount = Amount::shares(sellable)
+            .map_err(|e| ExecError::Decode(format!("invalid share amount {sellable} (orig {shares}): {e}")))?;
 
         let signable = self
             .client
