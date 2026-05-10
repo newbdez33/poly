@@ -33,6 +33,8 @@ async fn main() -> Result<()> {
     let args = TraderArgs::parse();
     args.validate().context("invalid CLI arguments")?;
 
+    let window_seconds = poly_tui::trader::market::window_seconds(args.window_minutes);
+
     dotenvy::dotenv().ok();
     let cfg = Config::from_env().context("loading .env")?;
     let gamma_host = std::env::var("GAMMA_HOST")
@@ -54,11 +56,14 @@ async fn main() -> Result<()> {
             .context("connecting Redis stream")?);
     let market: Arc<dyn MarketDiscovery> =
         Arc::new(GammaMarketDiscovery::new(gamma_host.clone()));
-    // 600s = 5min window + 5min post-close grace. With gamma-api caching
-    // defeated by the wrapper's cache-bust param, closure should be visible
-    // within ~30s of actual close, but the wider window absorbs CDN tail.
+    // window_seconds + 300s post-close grace. Gamma-api caching is defeated
+    // by the wrapper's cache-bust param, but the wider window absorbs CDN tail.
     let resolver: Arc<dyn WindowResolver> =
-        Arc::new(PolymarketResolver::new(market.clone(), Duration::from_secs(600), 5));
+        Arc::new(PolymarketResolver::new(
+            market.clone(),
+            Duration::from_secs((window_seconds + 300) as u64),
+            args.window_minutes,
+        ));
 
     let (executor, events): (Arc<dyn OrderExecutor>, Arc<dyn OrderEventStream>) = if args.dry_run {
         // Pair SimulatedExecutor + SimulatedOrderEvents: the events stream
@@ -151,7 +156,7 @@ async fn main() -> Result<()> {
         band_max: args.band_max,
         exit: exit_cfg,
         maker: args.maker,
-        window_seconds: 300,
+        window_seconds,
     };
     let window_exec: Arc<dyn WindowExecutor> = Arc::new(BoundWindowExec {
         deps: window_deps.clone(),
@@ -163,7 +168,7 @@ async fn main() -> Result<()> {
         state_store: state_store.clone(),
         emitter: emitter.clone(),
     };
-    let sched_cfg = SchedulerConfig { max_windows: args.max_windows, window_seconds: 300 };
+    let sched_cfg = SchedulerConfig { max_windows: args.max_windows, window_seconds };
 
     let final_state = run(ladder, sched_deps, sched_cfg, shutdown.clone()).await
         .map_err(|e: StateError| anyhow::anyhow!("scheduler error: {e}"))?;
@@ -196,8 +201,16 @@ async fn restore_or_init(
     let existing = store.load().await?;
     match (existing, args.reset) {
         (Some(s), false) if !s.is_stopped() => {
-            tracing::info!("resuming ladder: step={} pnl={}",
-                s.current_step, s.realized_pnl_usd);
+            // Detect mid-session window-length switch — refuse, instruct --reset.
+            if s.window_minutes != args.window_minutes {
+                anyhow::bail!(
+                    "saved ladder is for {}min windows; trader configured for {}min. \
+                     Pass --reset to start a fresh session.",
+                    s.window_minutes, args.window_minutes
+                );
+            }
+            tracing::info!("resuming ladder: step={} pnl={} window_minutes={}",
+                s.current_step, s.realized_pnl_usd, s.window_minutes);
             Ok(s)
         }
         (Some(s), false) if s.is_stopped() => {
@@ -206,7 +219,8 @@ async fn restore_or_init(
         _ => {
             store.clear().await?;
             let direction: Direction = args.direction.into();
-            Ok(LadderState::new(direction, args.base, args.max_step, chrono::Utc::now()))
+            Ok(LadderState::new(direction, args.base, args.max_step, chrono::Utc::now())
+                .with_window_minutes(args.window_minutes))
         }
     }
 }
