@@ -73,7 +73,6 @@ impl TradeFetcher for PolymarketTradeFetcher {
                 .map_err(|e| anyhow::anyhow!("limit out of range: {e}"))?
                 .offset(offset)
                 .map_err(|e| anyhow::anyhow!("offset out of range: {e}"))?
-                .taker_only(false)
                 .build();
             let page = self.client.trades(&req).await
                 .map_err(|e| anyhow::anyhow!("data-api trades error: {e}"))?;
@@ -101,11 +100,13 @@ impl TradeFetcher for PolymarketTradeFetcher {
 
             if n < PAGE_LIMIT as usize { break; }
             offset += PAGE_LIMIT;
-            // Defensive: SDK enforces offset ≤ 10000; abort cleanly if a single
-            // window has more than that (shouldn't happen for 5-min markets).
-            if offset >= 10000 {
+            // Polymarket's data-api rejects offset > 3000 with "max historical
+            // activity offset of 3000 exceeded". Break before we hit that cap
+            // (5 pages × 500 = 2500 trades — well above typical 100-300 per
+            // 5-min window with taker_only=true).
+            if offset > 2500 {
                 eprintln!(
-                    "[trades] WARNING window {} hit 10k offset cap; results truncated",
+                    "[trades] WARNING window {} has > 2500 trades; results truncated",
                     window_ts
                 );
                 break;
