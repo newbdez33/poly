@@ -28,6 +28,7 @@ pub async fn run_maker(
     ask: Decimal,        // reference for sweep ladder
     exit_cfg: &ExitConfig,
     window_ts: i64,
+    window_seconds: i64, // window length (300/900/3600 for {5,15,60}-min)
     shutdown: CancellationToken,
 ) -> WindowOutcome {
     // Phase 1: PendingBuy with sweep at t=30/60, give up at t=90.
@@ -43,8 +44,9 @@ pub async fn run_maker(
         }
     };
 
-    // Phase 2: PendingTpSell with SL price-watch + t=270 cancel-and-market-sell.
-    sell_with_tp_sl(deps, ladder, market, token_id, &buy_fill, exit_cfg, window_ts, shutdown).await
+    // Phase 2: PendingTpSell with SL price-watch + cancel-and-market-sell at
+    // window_ts + window_seconds - 30.
+    sell_with_tp_sl(deps, ladder, market, token_id, &buy_fill, exit_cfg, window_ts, window_seconds, shutdown).await
 }
 
 #[derive(Debug)]
@@ -203,7 +205,8 @@ async fn buy_with_sweep(
     BuyOutcome::Skipped
 }
 
-/// Phase 2 — TP limit + SL price watch + t=270 cancel-and-market-sell.
+/// Phase 2 — TP limit + SL price watch + cancel-and-market-sell at
+/// `window_ts + window_seconds - 30` (e.g. t=270 for 5min, t=870 for 15min).
 async fn sell_with_tp_sl(
     deps: &MakerDeps,
     ladder: &LadderState,
@@ -212,6 +215,7 @@ async fn sell_with_tp_sl(
     buy_fill: &BuyFill,
     exit_cfg: &ExitConfig,
     window_ts: i64,
+    window_seconds: i64,
     shutdown: CancellationToken,
 ) -> WindowOutcome {
     let _ = market; // keep param for future fields (resolution path); silence warn.
@@ -243,8 +247,8 @@ async fn sell_with_tp_sl(
     let mut tp_partial_shares = Decimal::ZERO;
     let mut tp_partial_proceeds = Decimal::ZERO;
 
-    // Cancel-at-t=270 absolute deadline (relative to window_ts, not to phase 2 start).
-    let cancel_unix = window_ts + 270;
+    // Cancel-at-(window_ts + window_seconds - 30) absolute deadline.
+    let cancel_unix = window_ts + window_seconds - 30;
     let now_unix = chrono::Utc::now().timestamp();
     let cancel_after = (cancel_unix - now_unix).max(0) as u64;
     let cancel_deadline = tokio::time::Instant::now() + Duration::from_secs(cancel_after);
@@ -610,6 +614,7 @@ mod tests {
             Decimal::from(5), Decimal::from_str("0.50").unwrap(),
             &cfg(),
             chrono::Utc::now().timestamp(), // now -> cancel deadline ~270s in future
+            300,
             CancellationToken::new(),
         ).await;
 
@@ -642,6 +647,7 @@ mod tests {
             Decimal::from(5), Decimal::from_str("0.50").unwrap(),
             &cfg(),
             chrono::Utc::now().timestamp(),
+            300,
             CancellationToken::new(),
         ).await;
 
@@ -686,6 +692,7 @@ mod tests {
             Decimal::from(5), Decimal::from_str("0.50").unwrap(),
             &cfg(),
             chrono::Utc::now().timestamp(),
+            300,
             CancellationToken::new(),
         ).await;
 
@@ -695,5 +702,53 @@ mod tests {
         assert!(kinds.iter().any(|k| matches!(k,
             TraderEventKind::ExitTriggered { kind: crate::trader::exit_watcher::ExitKind::Sl, .. }
         )));
+    }
+
+    /// Always-on bid stub. Unlike `StubPrice::const_bid` (1000-entry vec) this
+    /// never drains, which matters when the test runs to a 270s+ deadline with
+    /// a 50ms poll (5400+ ticks).
+    struct InfBid(Decimal);
+    #[async_trait::async_trait]
+    impl MidwindowPriceFetcher for InfBid {
+        async fn current_bid(&self, _: &str) -> Result<Decimal, PriceError> { Ok(self.0) }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancel_deadline_scales_with_window_seconds_15m() {
+        // 15min window: cancel deadline is window_ts + 900 - 30 = window_ts + 870.
+        // For a window 600s in the past, deadline = 270s in the future, which lets
+        // the test run cleanly under tokio::time::pause().
+        let exec = StubExec::new();
+        let events = ScriptedOrderEvents::new();
+        events.add(OrderId("stub-0".into()), vec![
+            OrderEvent::Filled {
+                id: OrderId("stub-0".into()),
+                fill_price: Decimal::from_str("0.49").unwrap(),
+                shares_filled: Decimal::from(10),
+                total_shares: Decimal::from(10),
+            },
+        ]);
+        // TP never fills; SL never fires (price stays > 0.45). InfBid avoids
+        // draining the bid queue under sub-second polling for 270+s deadline.
+        let price: Arc<dyn MidwindowPriceFetcher> = Arc::new(InfBid(Decimal::from_str("0.55").unwrap()));
+        let emitter = CapturingEmitter::new();
+        let deps = MakerDeps {
+            executor: exec.clone(), events: events.clone(),
+            price, emitter: emitter.clone(),
+        };
+
+        // 600s ago window_ts: with window_seconds=900, cancel = window_ts + 870
+        // ≈ now + 270s. Final residual market sell @ stub bid 0.55.
+        let window_ts = chrono::Utc::now().timestamp() - 600;
+        let outcome = run_maker(
+            &deps, &fresh_ladder(), &fake_market(), "tok-up",
+            Decimal::from(5), Decimal::from_str("0.50").unwrap(),
+            &cfg(), window_ts,
+            900,  // window_seconds = 15min
+            CancellationToken::new(),
+        ).await;
+        // Buy: 10 sh @ 0.49 = $4.90. Sell: 10 sh @ 0.55 = $5.50. Won $0.60.
+        assert!(matches!(outcome, WindowOutcome::Won { .. }),
+                "outcome was: {outcome:?}");
     }
 }

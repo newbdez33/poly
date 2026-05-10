@@ -89,7 +89,8 @@ pub async fn run_window(
             emitter: deps.emitter.clone(),
         };
         return crate::trader::maker::run_maker(
-            &maker_deps, ladder, &market, &token_id, dollars, ask, exit_cfg, window_ts,
+            &maker_deps, ladder, &market, &token_id, dollars, ask, exit_cfg,
+            window_ts, cfg.window_seconds,
             tokio_util::sync::CancellationToken::new(),
         ).await;
     }
