@@ -55,11 +55,11 @@ async fn main() -> Result<()> {
         }
         OracleKind::Real => {
             eprintln!(
-                "[poly-backtest] loading real trade history (auto-fetching uncached, parallel=10)..."
+                "[poly-backtest] loading real trade history (auto-fetching uncached, parallel=4)..."
             );
             let trades_dir = cache_root.join("trades");
             let store = std::sync::Arc::new(CachedTradeStore::new(trades_dir)?);
-            let fetcher = std::sync::Arc::new(PolymarketTradeFetcher::new(0)); // throttle handled by concurrency cap
+            let fetcher = std::sync::Arc::new(PolymarketTradeFetcher::new(150)); // 150ms intra-page throttle
             let mut all_trades: HashMap<i64, Vec<Trade>> = HashMap::new();
             let mut cached = 0usize;
             let mut skipped = 0usize;
@@ -87,7 +87,7 @@ async fn main() -> Result<()> {
 
             let mut pending = FuturesUnordered::new();
             let mut iter = to_fetch.into_iter();
-            const PARALLEL: usize = 10;
+            const PARALLEL: usize = 4;
             for _ in 0..PARALLEL {
                 if let Some((ts, cid)) = iter.next() {
                     let f = fetcher.clone();
