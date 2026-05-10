@@ -334,10 +334,12 @@ fn render_market_strip(frame: &mut Frame, area: Rect, state: &UiState) {
 
     spans.push(Span::raw("   "));
     let now_ts = state.now.timestamp();
-    let secs = m.seconds_to_next_boundary(now_ts, 5);
+    let mins = state.window_minutes;
+    let window_secs = mins as i64 * 60;
+    let secs = m.seconds_to_next_boundary(now_ts, mins);
     // Clock emoji (\u{23f1}) is 2-cell wide on most terminals — pad with two
     // spaces so the timer doesn't visually hug the icon.
-    if secs > 0 && secs < 300 {
+    if secs > 0 && secs < window_secs {
         spans.push(Span::raw(format!("\u{23f1}  {}:{:02}", secs / 60, secs % 60)));
     } else {
         spans.push(Span::styled(
@@ -798,5 +800,24 @@ mod tests {
             fetched_at: fixed_now(),
         }));
         insta::assert_snapshot!("balance_two_positions", render_to_buffer(&s));
+    }
+
+    #[test]
+    fn ui_state_carries_window_minutes() {
+        let s = UiState {
+            balance: None,
+            last_refresh: None,
+            clob_health: HealthLed::Green,
+            redis_health: HealthLed::Green,
+            refresh_interval: Duration::from_secs(30),
+            now: chrono::Utc::now(),
+            trader_log: vec![],
+            trader_latest: None,
+            trader_health: crate::app::TraderHealth::NotStarted,
+            market: None,
+            positions: None,
+            window_minutes: 15,
+        };
+        assert_eq!(s.window_minutes, 15);
     }
 }
