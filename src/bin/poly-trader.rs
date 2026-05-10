@@ -16,11 +16,13 @@ use poly_tui::trader::executor::OrderExecutor;
 use poly_tui::trader::exit_watcher::ExitConfig;
 use poly_tui::trader::ladder::{Direction, LadderState};
 use poly_tui::trader::market::MarketDiscovery;
+use poly_tui::trader::order_events::{OrderEventStream, PolymarketPollOrderEvents};
 use poly_tui::trader::price::MidwindowPriceFetcher;
 use poly_tui::trader::resolver::{PolymarketResolver, WindowResolver};
 use poly_tui::trader::scheduler::{run, SchedulerConfig, SchedulerDeps, WindowExecutor};
 use poly_tui::trader::state::TraderStateStore;
 use poly_tui::trader::window::{run_window, WindowConfig, WindowDeps};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -58,11 +60,22 @@ async fn main() -> Result<()> {
     let resolver: Arc<dyn WindowResolver> =
         Arc::new(PolymarketResolver::new(market.clone(), Duration::from_secs(600)));
 
-    let executor: Arc<dyn OrderExecutor> = if args.dry_run {
-        Arc::new(SimulatedExecutor::default())
+    let (executor, events): (Arc<dyn OrderExecutor>, Arc<dyn OrderEventStream>) = if args.dry_run {
+        (
+            Arc::new(SimulatedExecutor::default()),
+            Arc::new(AutoFillEvents),
+        )
     } else {
-        Arc::new(ClobOrderExecutor::connect(&cfg.clob_host, &cfg.polymarket_private_key).await
-            .context("CLOB auth (fatal)")?)
+        // Real CLOB: keep the executor's auth'd client and reuse it for the
+        // OrderEventStream poller. v1.7 simplification — v1.7.1 may refactor
+        // to a single ownership chain; this avoids re-running the auth flow.
+        let clob = ClobOrderExecutor::connect(&cfg.clob_host, &cfg.polymarket_private_key).await
+            .context("CLOB auth (fatal)")?;
+        let poll_client = clob.inner_client();
+        (
+            Arc::new(clob),
+            Arc::new(PolymarketPollOrderEvents::new(poll_client)),
+        )
     };
 
     // Acquire singleton lock
@@ -119,6 +132,7 @@ async fn main() -> Result<()> {
         resolver: resolver.clone(),
         emitter: emitter.clone(),
         price: price.clone(),
+        events: events.clone(),
     });
     let exit_cfg = match args.exit_rule {
         ExitRuleArg::Hold => None,
@@ -132,6 +146,7 @@ async fn main() -> Result<()> {
         band_min: args.band_min,
         band_max: args.band_max,
         exit: exit_cfg,
+        maker: args.maker,
     };
     let window_exec: Arc<dyn WindowExecutor> = Arc::new(BoundWindowExec {
         deps: window_deps.clone(),
@@ -165,6 +180,34 @@ impl WindowExecutor for BoundWindowExec {
         -> poly_tui::trader::ladder::WindowOutcome
     {
         run_window(&self.deps, &self.cfg, ladder, window_ts).await
+    }
+}
+
+/// Dry-run OrderEventStream: any watched order id immediately receives a
+/// Filled event matching its full size at $0.50 buy / $0.85 sell.
+/// Crude but adequate for state-machine validation in --dry-run mode.
+struct AutoFillEvents;
+
+#[async_trait::async_trait]
+impl OrderEventStream for AutoFillEvents {
+    async fn watch(&self, id: poly_tui::trader::executor::OrderId)
+        -> Result<tokio::sync::mpsc::Receiver<poly_tui::trader::order_events::OrderEvent>,
+                  poly_tui::trader::errors::StreamError>
+    {
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        tokio::spawn(async move {
+            // Yield once so the caller can finish posting before we "fill".
+            tokio::task::yield_now().await;
+            let _ = tx.send(poly_tui::trader::order_events::OrderEvent::Filled {
+                id: id.clone(),
+                // The actual fill price is irrelevant for dry-run; run_maker
+                // uses the limit price from its own state, not from this event.
+                fill_price: rust_decimal::Decimal::from_str("0.50").unwrap(),
+                shares_filled: rust_decimal::Decimal::from(10),
+                total_shares: rust_decimal::Decimal::from(10),
+            }).await;
+        });
+        Ok(rx)
     }
 }
 

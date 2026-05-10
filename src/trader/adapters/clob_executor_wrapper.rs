@@ -64,6 +64,13 @@ pub struct ClobOrderExecutor {
 }
 
 impl ClobOrderExecutor {
+    /// Expose the inner SDK client (Arc-wrapped) for OrderEventStream polling.
+    /// The executor already owns one auth'd client; sharing it keeps a single
+    /// session vs opening a parallel auth flow.
+    pub fn inner_client(&self) -> std::sync::Arc<AuthClient> {
+        std::sync::Arc::new(self.client.clone())
+    }
+
     /// Authenticates with the Polymarket CLOB and returns a ready executor.
     ///
     /// `host`        — e.g. `"https://clob.polymarket.com"`
