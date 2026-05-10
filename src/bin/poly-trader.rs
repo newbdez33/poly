@@ -162,7 +162,7 @@ async fn main() -> Result<()> {
         state_store: state_store.clone(),
         emitter: emitter.clone(),
     };
-    let sched_cfg = SchedulerConfig { max_windows: args.max_windows };
+    let sched_cfg = SchedulerConfig { max_windows: args.max_windows, window_seconds: 300 };
 
     let final_state = run(ladder, sched_deps, sched_cfg, shutdown.clone()).await
         .map_err(|e: StateError| anyhow::anyhow!("scheduler error: {e}"))?;

@@ -1,7 +1,7 @@
 use crate::trader::errors::StateError;
 use crate::trader::event::{TraderEvent, TraderEventEmitter, TraderEventKind};
 use crate::trader::ladder::{apply_outcome, LadderState, StopReason, WindowOutcome};
-use crate::trader::market::next_5min_boundary;
+use crate::trader::market::next_window_boundary;
 use crate::trader::state::TraderStateStore;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -23,6 +23,8 @@ pub struct SchedulerDeps {
 
 pub struct SchedulerConfig {
     pub max_windows: Option<u32>,
+    /// Window length in seconds (300/900/3600 for {5,15,60}-min windows).
+    pub window_seconds: i64,
 }
 
 pub async fn run(
@@ -42,9 +44,10 @@ pub async fn run(
             if windows_run >= max { break; }
         }
 
-        // Wait until next 5-min boundary, observing shutdown.
+        // Wait until next window boundary, observing shutdown.
         let now_ts = chrono::Utc::now().timestamp();
-        let next_ts = next_5min_boundary(now_ts);
+        let mins = (cfg.window_seconds / 60) as u32;
+        let next_ts = next_window_boundary(now_ts, mins);
         let wait = Duration::from_secs((next_ts - now_ts).max(0) as u64);
 
         tokio::select! {
@@ -164,7 +167,7 @@ mod tests {
         };
         let token = CancellationToken::new();
         let task = tokio::spawn(run(ladder(), deps,
-            SchedulerConfig { max_windows: Some(3) }, token));
+            SchedulerConfig { max_windows: Some(3), window_seconds: 300 }, token));
         tokio::time::advance(Duration::from_secs(60 * 60)).await;
         let final_state = task.await.unwrap().unwrap();
         assert_eq!(final_state.windows_won, 3);
@@ -183,7 +186,7 @@ mod tests {
         let token = CancellationToken::new();
         let token2 = token.clone();
         let task = tokio::spawn(run(ladder(), deps,
-            SchedulerConfig { max_windows: None }, token));
+            SchedulerConfig { max_windows: None, window_seconds: 300 }, token));
         token2.cancel();
         let final_state = task.await.unwrap().unwrap();
         assert_eq!(final_state.stopped, Some(StopReason::ManualStop));
@@ -203,9 +206,15 @@ mod tests {
         };
         let token = CancellationToken::new();
         let task = tokio::spawn(run(ladder(), deps,
-            SchedulerConfig { max_windows: None }, token));
+            SchedulerConfig { max_windows: None, window_seconds: 300 }, token));
         tokio::time::advance(Duration::from_secs(60 * 60)).await;
         let final_state = task.await.unwrap().unwrap();
         assert_eq!(final_state.stopped, Some(StopReason::CapReached));
+    }
+
+    #[test]
+    fn scheduler_config_carries_window_seconds() {
+        let c = SchedulerConfig { max_windows: None, window_seconds: 900 };
+        assert_eq!(c.window_seconds, 900);
     }
 }

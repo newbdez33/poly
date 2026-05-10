@@ -64,7 +64,7 @@ async fn e2e_full_session_5_wins() {
             state_store: store,
             emitter,
         },
-        SchedulerConfig { max_windows: Some(5) },
+        SchedulerConfig { max_windows: Some(5), window_seconds: 300 },
         CancellationToken::new(),
     ));
     tokio::time::advance(Duration::from_secs(60 * 30)).await;
@@ -96,7 +96,7 @@ async fn e2e_cap_reached_stops_session() {
             state_store: store,
             emitter,
         },
-        SchedulerConfig { max_windows: None },
+        SchedulerConfig { max_windows: None, window_seconds: 300 },
         CancellationToken::new(),
     ));
     tokio::time::advance(Duration::from_secs(60 * 30)).await;
