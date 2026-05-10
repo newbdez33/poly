@@ -38,6 +38,26 @@ pub trait OrderExecutor: Send + Sync {
     ) -> Result<FillResult, ExecError> {
         self.sell_market(token_id, shares).await
     }
+
+    /// Post a limit order (BUY or SELL) good-till-cancel. Returns the CLOB
+    /// order_id on acceptance. Default returns `ExecError::NotSupported` —
+    /// only maker-mode requires this; v1.5 path doesn't.
+    async fn place_limit(
+        &self,
+        token_id: &str,
+        side: OrderSide,
+        price: Decimal,
+        shares: Decimal,
+    ) -> Result<OrderId, ExecError> {
+        let _ = (token_id, side, price, shares);
+        Err(ExecError::NotSupported)
+    }
+
+    /// Cancel a previously-placed order. Default returns `ExecError::NotSupported`.
+    async fn cancel(&self, order_id: &OrderId) -> Result<(), ExecError> {
+        let _ = order_id;
+        Err(ExecError::NotSupported)
+    }
 }
 
 /// Number of whole shares to buy with `dollars` at `ask`. Rounds DOWN so we never
@@ -127,5 +147,30 @@ mod tests {
             serde_json::to_string(&OrderSide::Buy).unwrap(),
             serde_json::to_string(&OrderSide::Sell).unwrap(),
         );
+    }
+
+    struct DefaultsOnlyExecutor;
+    #[async_trait::async_trait]
+    impl OrderExecutor for DefaultsOnlyExecutor {
+        async fn buy_fok(&self, _t: &str, _d: Decimal) -> Result<FillResult, crate::trader::errors::ExecError> {
+            unimplemented!()
+        }
+        async fn sell_market(&self, _t: &str, _s: Decimal) -> Result<FillResult, crate::trader::errors::ExecError> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn default_place_limit_returns_not_supported() {
+        let e = DefaultsOnlyExecutor;
+        let r = e.place_limit("tok", OrderSide::Buy, Decimal::from_str("0.50").unwrap(), Decimal::from(10)).await;
+        assert!(matches!(r, Err(crate::trader::errors::ExecError::NotSupported)));
+    }
+
+    #[tokio::test]
+    async fn default_cancel_returns_not_supported() {
+        let e = DefaultsOnlyExecutor;
+        let r = e.cancel(&OrderId("x".into())).await;
+        assert!(matches!(r, Err(crate::trader::errors::ExecError::NotSupported)));
     }
 }
