@@ -3,12 +3,14 @@ use crate::trader::executor::{compute_share_count, FillResult, OrderExecutor};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Dry-run executor: simulates fills without touching CLOB. Default fill price
 /// $0.50 for buys, $0.99 for sells.
 pub struct SimulatedExecutor {
     buy_price: Decimal,
     sell_price: Decimal,
+    order_counter: AtomicU64,
 }
 
 impl Default for SimulatedExecutor {
@@ -16,6 +18,7 @@ impl Default for SimulatedExecutor {
         Self {
             buy_price: Decimal::from_str("0.50").unwrap(),
             sell_price: Decimal::from_str("0.99").unwrap(),
+            order_counter: AtomicU64::new(0),
         }
     }
 }
@@ -23,7 +26,7 @@ impl Default for SimulatedExecutor {
 impl SimulatedExecutor {
     pub fn new() -> Self { Self::default() }
     pub fn with_prices(buy: Decimal, sell: Decimal) -> Self {
-        Self { buy_price: buy, sell_price: sell }
+        Self { buy_price: buy, sell_price: sell, order_counter: AtomicU64::new(0) }
     }
 }
 
@@ -51,6 +54,24 @@ impl OrderExecutor for SimulatedExecutor {
         let fill_price = (bid_hint * slip).max(Decimal::ZERO);
         let dollars = fill_price * shares;
         Ok(FillResult { fill_price, shares, dollars })
+    }
+
+    async fn place_limit(
+        &self,
+        _token_id: &str,
+        _side: crate::trader::executor::OrderSide,
+        _price: Decimal,
+        _shares: Decimal,
+    ) -> Result<crate::trader::executor::OrderId, ExecError> {
+        let n = self.order_counter.fetch_add(1, Ordering::SeqCst);
+        Ok(crate::trader::executor::OrderId(format!("sim-order-{n}")))
+    }
+
+    async fn cancel(
+        &self,
+        _order_id: &crate::trader::executor::OrderId,
+    ) -> Result<(), ExecError> {
+        Ok(())
     }
 }
 
@@ -96,5 +117,31 @@ mod tests {
         let ex = SimulatedExecutor::default();
         let f = ex.sell_at_bid("any", Decimal::from(10), Decimal::ZERO).await.unwrap();
         assert_eq!(f.dollars, Decimal::ZERO);
+    }
+
+    use crate::trader::executor::{OrderId, OrderSide};
+
+    #[tokio::test]
+    async fn place_limit_returns_synthetic_order_id() {
+        let ex = SimulatedExecutor::default();
+        let id = ex.place_limit("tok-1", OrderSide::Buy,
+            Decimal::from_str("0.49").unwrap(), Decimal::from(10)).await.unwrap();
+        // Synthetic id is deterministic and non-empty.
+        assert!(!id.0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn place_limit_returns_unique_ids_for_consecutive_calls() {
+        let ex = SimulatedExecutor::default();
+        let id1 = ex.place_limit("tok", OrderSide::Buy, Decimal::from_str("0.49").unwrap(), Decimal::from(10)).await.unwrap();
+        let id2 = ex.place_limit("tok", OrderSide::Buy, Decimal::from_str("0.50").unwrap(), Decimal::from(10)).await.unwrap();
+        assert_ne!(id1, id2);
+    }
+
+    #[tokio::test]
+    async fn cancel_succeeds_for_any_order_id() {
+        let ex = SimulatedExecutor::default();
+        let r = ex.cancel(&OrderId("anything".into())).await;
+        assert!(r.is_ok());
     }
 }
