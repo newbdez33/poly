@@ -211,9 +211,30 @@ Polymarket Magic/邮箱账户的 EOA 默认 **0 MATIC**——CLOB 交易走 Poly
 - [x] README + TODO docs
 
 **Open items / next versions:**
-- WebSocket fill detection (v1.7.1) — currently polling-only at 2s
-- Single-CLOB-client refactor (v1.7.2) — currently `inner_client()` accessor on executor; cleaner ownership chain possible
+- WebSocket fill detection — currently polling-only at 2s
+- Single-CLOB-client refactor — currently `inner_client()` accessor on executor; cleaner ownership chain possible
 - Real-money A/B comparison vs v1.5 to measure actual fee savings
+
+---
+
+## v1.7.1 — `--window-minutes` flag ✅ COMPLETE
+
+Adds `--window-minutes 5|15|60` to `poly-trader`. TUI auto-tracks via `LadderState.window_minutes` from the event stream. See `docs/superpowers/specs/2026-05-10-window-minutes-design.md`.
+
+- [x] `market.rs` — `window_seconds`/`window_slug`/`floor_window`/`next_window_boundary` parameterized helpers
+- [x] `LadderState.window_minutes` field with serde back-compat default
+- [x] CLI: `--window-minutes` flag with {5,15,60} validation
+- [x] `SchedulerConfig.window_seconds` + `WindowConfig.window_seconds` + `MakerDeps` threading
+- [x] Resolver timeout = `window_seconds + 300s` set at trader startup
+- [x] Maker `cancel_deadline = window_ts + window_seconds - 30`
+- [x] `MarketDiscovery::find_window(ts, mins)` trait change
+- [x] TUI auto-detect via `mpsc::Sender<u32>` from app to market_watch
+- [x] `restore_or_init` refuses mid-session window-length switch
+- [x] README + TODO docs
+
+**Open items / next:**
+- v1.7.2: extend backtest binary to 15m/60m (currently 5m hardcoded)
+- v1.8: real-money A/B test 5m vs 15m with --maker
 
 ---
 

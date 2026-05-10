@@ -137,8 +137,10 @@ See `TODO.md`. Highlights:
 - **v1.4** ✅ — backtest framework (`poly-backtest` binary, 6 strategies, HTML report)
 - **v1.5** ✅ — TP/SL exits in trader (`--exit-rule tp-sl`)
 - **v1.6** ✅ — TUI positions (live diagnostic of stuck shares)
+- **v1.7** ✅ — Maker mode (`--maker` limit-order entry + TP)
+- **v1.7.1** ✅ — `--window-minutes 5|15|60` flag (TUI auto-detects)
 - **v1.3** — daemon / TUI split. Required before any new trading logic (multi-strategy, dynamic config, etc.)
-- **v1.7+** — strategy selection driven by v1.4 backtest, markets, observability
+- **v1.8+** — strategy selection driven by v1.4 backtest, markets, observability
 
 ## Documentation
 
@@ -154,6 +156,8 @@ See `TODO.md`. Highlights:
 - `docs/superpowers/plans/2026-05-10-trader-tp-sl.md` — v1.5 plan
 - `docs/superpowers/specs/2026-05-10-tui-positions-design.md` — v1.6 design
 - `docs/superpowers/plans/2026-05-10-tui-positions.md` — v1.6 plan
+- `docs/superpowers/specs/2026-05-10-window-minutes-design.md` — v1.7.1 design
+- `docs/superpowers/plans/2026-05-10-window-minutes.md` — v1.7.1 plan
 - `TODO.md` — roadmap and v1.3 daemon split plan
 
 ## Trader
@@ -232,6 +236,30 @@ poly-trader --direction up --base 5 \
 - Requires Polymarket maker-fee structure for actual savings. If maker == taker, v1.7 == v1.5 cost.
 - Lower window participation (~5–10% windows skipped due to entry sweep exhausting). Backtest assumed 100% — discount expectation accordingly.
 - Fill detection via 2s polling (≤2s latency vs market order's instant fill).
+
+### Window length (v1.7.1, 5/15/60 min)
+
+Default `--window-minutes 5` reproduces v1.7 behavior. Polymarket also offers 15-minute and 60-minute BTC up/down markets:
+
+```bash
+# 15min — 4x deeper liquidity than 5min, better for --maker
+poly-trader --window-minutes 15 --direction up --base 5 --maker \
+  --exit-rule tp-sl --tp-price 0.85 --sl-price 0.45
+
+# 60min — supported but unvalidated by backtest
+poly-trader --window-minutes 60 --direction up --base 5 \
+  --exit-rule tp-sl --tp-price 0.85 --sl-price 0.45
+```
+
+| Window | Backtest | Liquidity | Hourly exposure (--max-step 5) |
+|---|---|---|---|
+| 5min  | validated +$7.5K/30d | ~$8K | $60/hr base |
+| 15min | unvalidated         | ~$32K | $20/hr base |
+| 60min | unvalidated         | varies | $5/hr base |
+
+Probability structure (band, TP, SL on UP token) is window-length invariant; the strategy's positive expectancy on 5min should carry to 15/60 in theory, but real-money A/B is the only proof.
+
+The TUI auto-detects the trader's window length from its event stream — no separate flag needed. If the trader switches windows mid-state (without `--reset`), it refuses to start with a clear error.
 
 ### Dry-run vs real-money differences
 
