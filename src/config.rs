@@ -17,7 +17,10 @@ pub struct Config {
 
 fn default_redis_url() -> String { "redis://127.0.0.1:6379".to_string() }
 fn default_refresh_interval() -> u64 { 30 }
-fn default_clob_host() -> String { "https://clob-v2.polymarket.com".to_string() }
+// Polymarket retired the `clob-v2` hostname; it now 301-redirects to `clob`,
+// and reqwest downgrades POST→GET on 301 follow → /order returns 405. Point at
+// the canonical host directly so signed orders reach the CLOB intact.
+fn default_clob_host() -> String { "https://clob.polymarket.com".to_string() }
 fn default_log_level() -> String { "info".to_string() }
 fn default_polygon_rpc_url() -> String { "https://polygon-rpc.com".to_string() }
 
@@ -59,7 +62,7 @@ mod tests {
             assert_eq!(cfg.polymarket_private_key, "0xabc");
             assert_eq!(cfg.redis_url, "redis://127.0.0.1:6379");
             assert_eq!(cfg.refresh_interval_secs, 30);
-            assert_eq!(cfg.clob_host, "https://clob-v2.polymarket.com");
+            assert_eq!(cfg.clob_host, "https://clob.polymarket.com");
             assert_eq!(cfg.log_level, "info");
             assert_eq!(cfg.polygon_rpc_url, "https://polygon-rpc.com");
         });
