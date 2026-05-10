@@ -39,6 +39,15 @@ pub enum TraderEventKind {
     SellRejected { reason: String },
     LadderUpdated { from_step: u8, to_step: u8, outcome: WindowOutcome },
     Alert { message: String },
+    BuyLimitPosted { order_id: String, price: Decimal },
+    BuyLimitSwept { from_price: Decimal, to_price: Decimal },
+    TpLimitPosted { order_id: String, price: Decimal },
+    TpLimitFilled {
+        order_id: String,
+        fill_price: Decimal,
+        shares: Decimal,
+        partial: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,5 +175,51 @@ mod tests {
         };
         assert_ne!(serde_json::to_string(&tp).unwrap(),
                    serde_json::to_string(&sl).unwrap());
+    }
+
+    #[test]
+    fn buy_limit_posted_serde_roundtrip() {
+        let e = fake_event(TraderEventKind::BuyLimitPosted {
+            order_id: "ord-1".into(),
+            price: Decimal::from_str("0.49").unwrap(),
+        });
+        let back: TraderEvent =
+            serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(e, back);
+    }
+
+    #[test]
+    fn buy_limit_swept_serde_roundtrip() {
+        let e = fake_event(TraderEventKind::BuyLimitSwept {
+            from_price: Decimal::from_str("0.49").unwrap(),
+            to_price: Decimal::from_str("0.50").unwrap(),
+        });
+        let back: TraderEvent =
+            serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(e, back);
+    }
+
+    #[test]
+    fn tp_limit_posted_serde_roundtrip() {
+        let e = fake_event(TraderEventKind::TpLimitPosted {
+            order_id: "ord-2".into(),
+            price: Decimal::from_str("0.85").unwrap(),
+        });
+        let back: TraderEvent =
+            serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(e, back);
+    }
+
+    #[test]
+    fn tp_limit_filled_partial_serde_roundtrip() {
+        let e = fake_event(TraderEventKind::TpLimitFilled {
+            order_id: "ord-2".into(),
+            fill_price: Decimal::from_str("0.85").unwrap(),
+            shares: Decimal::from(6),
+            partial: true,
+        });
+        let back: TraderEvent =
+            serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(e, back);
     }
 }

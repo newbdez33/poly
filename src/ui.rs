@@ -210,6 +210,13 @@ fn format_event_kind(kind: &crate::trader::event::TraderEventKind) -> String {
             from_step, to_step, ..
         } => format!("LadderUpdated {from_step}->{to_step}"),
         Alert { message } => format!("ALERT {message}"),
+        BuyLimitPosted { price, .. } => format!("BuyLimitPosted @ {price}"),
+        BuyLimitSwept { from_price, to_price } => format!("BuyLimitSwept {from_price}->{to_price}"),
+        TpLimitPosted { price, .. } => format!("TpLimitPosted @ {price}"),
+        TpLimitFilled { fill_price, shares, partial, .. } => {
+            let tag = if *partial { "partial" } else { "full" };
+            format!("TpLimitFilled {tag} {shares}sh @ {fill_price}")
+        }
     }
 }
 
