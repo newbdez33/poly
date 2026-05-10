@@ -1,9 +1,13 @@
 use crate::backtest::data::binance::BinanceData;
 use crate::backtest::data::gamma_history::WindowMeta;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
+use rand_distr::{Distribution, Normal as NormalDist};
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use statrs::distribution::{ContinuousCDF, Normal};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub trait TokenPriceOracle: Send + Sync {
     /// (bid, ask) for the UP token at `t_secs` seconds into the window.
@@ -64,6 +68,42 @@ impl TokenPriceOracle for BlackScholesOracle {
             Decimal::from_f64(bid).unwrap_or(Decimal::ZERO),
             Decimal::from_f64(ask).unwrap_or(Decimal::ONE),
         )
+    }
+}
+
+/// Wraps `BlackScholesOracle` and adds Gaussian white noise to bid/ask.
+/// Same noise sample applies to both quotes (correlated). Clamped to
+/// [0.01, 0.99] to keep prices physically valid.
+///
+/// Determinism: seeded `StdRng` produces a reproducible sequence for the
+/// sequential calls of a backtest run.
+pub struct NoisyBlackScholesOracle {
+    base: BlackScholesOracle,
+    sigma: f64,
+    rng: Mutex<StdRng>,
+    noise_dist: NormalDist<f64>,
+}
+
+impl NoisyBlackScholesOracle {
+    pub fn new(base: BlackScholesOracle, sigma: f64, seed: u64) -> Self {
+        let dist = NormalDist::new(0.0, sigma.max(0.0)).expect("valid normal dist");
+        Self {
+            base,
+            sigma,
+            rng: Mutex::new(StdRng::seed_from_u64(seed)),
+            noise_dist: dist,
+        }
+    }
+}
+
+impl TokenPriceOracle for NoisyBlackScholesOracle {
+    fn price_at(&self, window: &WindowMeta, t_secs: u32) -> (Decimal, Decimal) {
+        let (bid_bs, ask_bs) = self.base.price_at(window, t_secs);
+        if self.sigma == 0.0 {
+            return (bid_bs, ask_bs);
+        }
+        // Non-zero noise path implemented in Task 3.
+        (bid_bs, ask_bs)
     }
 }
 
@@ -167,5 +207,21 @@ mod tests {
         let vol_sigma = estimate_sigma(&vol_data);
 
         assert!(vol_sigma > calm_sigma, "volatile σ ({}) should exceed calm σ ({})", vol_sigma, calm_sigma);
+    }
+
+    #[test]
+    fn noisy_oracle_with_sigma_zero_matches_base() {
+        let btc = make_btc_constant(80000.0);
+        let base = BlackScholesOracle::new(btc.clone(), 80.0, 0.0);
+        let base2 = BlackScholesOracle::new(btc, 80.0, 0.0);
+        let noisy = NoisyBlackScholesOracle::new(base2, 0.0, 42);
+
+        let window = make_window(80000.0);
+        for t in [0u32, 60, 120, 180, 240, 290] {
+            let (bid_b, ask_b) = base.price_at(&window, t);
+            let (bid_n, ask_n) = noisy.price_at(&window, t);
+            assert_eq!(bid_b, bid_n, "bid mismatch at t={t}");
+            assert_eq!(ask_b, ask_n, "ask mismatch at t={t}");
+        }
     }
 }
