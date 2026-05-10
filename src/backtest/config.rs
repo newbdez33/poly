@@ -203,4 +203,26 @@ mod tests {
         ]);
         assert_eq!(a.noise_seed, 12345);
     }
+
+    #[test]
+    fn parses_oracle_noise_negative_value() {
+        // Clap accepts the value at parse time; runtime validation in main()
+        // rejects. This test just documents that clap doesn't reject negatives
+        // at parse — they must be caught downstream. Use `--flag=val` form
+        // so clap doesn't mistake `-0.1` for a short flag.
+        let a = parse(&[
+            "--start", "2026-04-09", "--end", "2026-05-09",
+            "--oracle-noise=-0.1",
+        ]);
+        assert_eq!(a.oracle_noise, -0.1);
+    }
+
+    #[test]
+    fn parses_oracle_noise_above_half() {
+        let a = parse(&[
+            "--start", "2026-04-09", "--end", "2026-05-09",
+            "--oracle-noise", "0.6",
+        ]);
+        assert_eq!(a.oracle_noise, 0.6);
+    }
 }
