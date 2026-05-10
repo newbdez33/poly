@@ -1,5 +1,6 @@
 use crate::backtest::data::binance::BinanceData;
 use crate::backtest::data::gamma_history::WindowMeta;
+use crate::backtest::data::trades::{Outcome, Trade, TradeSide};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, Normal as NormalDist};
@@ -7,6 +8,7 @@ use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use statrs::distribution::{ContinuousCDF, Normal};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 pub trait TokenPriceOracle: Send + Sync {
@@ -110,12 +112,69 @@ impl TokenPriceOracle for NoisyBlackScholesOracle {
     }
 }
 
+const PRE_TRADE_FALLBACK: Decimal = dec!(0.5);
+
+/// Oracle backed by recorded Polymarket trade history.
+///
+/// Constructor pre-filters trades to outcome=Up + intra-window only, then
+/// sorts ascending. `price_at` does a reverse linear scan to find the most
+/// recent SELL (bid) and BUY (ask) at or before `t_secs`. When no qualifying
+/// trade exists, returns `PRE_TRADE_FALLBACK` (0.50) — the only no-info-leak
+/// option for the pre-trade portion of a window.
+pub struct RealTradeOracle {
+    up_trades_by_window: HashMap<i64, Vec<Trade>>,
+}
+
+impl RealTradeOracle {
+    pub fn new(all_trades: HashMap<i64, Vec<Trade>>) -> Self {
+        let up_trades = all_trades
+            .into_iter()
+            .map(|(ts, trades)| {
+                let mut up: Vec<Trade> = trades
+                    .into_iter()
+                    .filter(|t| {
+                        t.outcome == Outcome::Up
+                            && t.timestamp >= ts
+                            && t.timestamp < ts + 300
+                    })
+                    .collect();
+                up.sort_by_key(|t| t.timestamp);
+                (ts, up)
+            })
+            .collect();
+        Self { up_trades_by_window: up_trades }
+    }
+}
+
+impl TokenPriceOracle for RealTradeOracle {
+    fn price_at(&self, window: &WindowMeta, t_secs: u32) -> (Decimal, Decimal) {
+        let abs_t = window.window_ts + t_secs as i64;
+        let trades = match self.up_trades_by_window.get(&window.window_ts) {
+            Some(t) => t,
+            None => return (PRE_TRADE_FALLBACK, PRE_TRADE_FALLBACK),
+        };
+
+        let bid = trades.iter().rev()
+            .find(|t| t.side == TradeSide::Sell && t.timestamp <= abs_t)
+            .map(|t| t.price)
+            .unwrap_or(PRE_TRADE_FALLBACK);
+
+        let ask = trades.iter().rev()
+            .find(|t| t.side == TradeSide::Buy && t.timestamp <= abs_t)
+            .map(|t| t.price)
+            .unwrap_or(PRE_TRADE_FALLBACK);
+
+        (bid, ask)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backtest::data::binance::BtcCandle;
     use crate::trader::ladder::Direction;
     use rust_decimal_macros::dec;
+    use std::str::FromStr;
 
     fn make_window(price_to_beat: f64) -> WindowMeta {
         WindowMeta {
@@ -307,5 +366,142 @@ mod tests {
         // 3-σ bound for σ=0.05 over 10k samples is ±0.05 / sqrt(10000) × 3 ≈ ±0.0015
         // Loosen to ±0.005 to absorb clamp-induced asymmetry near boundaries.
         assert!(mean.abs() < 0.005, "noise mean drift: {mean}");
+    }
+
+    use crate::backtest::data::trades::{Trade, TradeSide, Outcome};
+    use std::collections::HashMap;
+
+    fn up_trade(ts: i64, side: TradeSide, price: &str) -> Trade {
+        Trade {
+            timestamp: ts,
+            side,
+            price: Decimal::from_str(price).unwrap(),
+            size: dec!(10),
+            outcome: Outcome::Up,
+        }
+    }
+
+    fn down_trade(ts: i64, side: TradeSide, price: &str) -> Trade {
+        Trade { outcome: Outcome::Down, ..up_trade(ts, side, price) }
+    }
+
+    #[test]
+    fn real_oracle_returns_last_sell_as_bid() {
+        let window = make_window(80000.0); // window_ts = 1000
+        let trades = vec![
+            up_trade(1010, TradeSide::Sell, "0.50"),
+            up_trade(1020, TradeSide::Sell, "0.45"),
+        ];
+        let mut by_window = HashMap::new();
+        by_window.insert(1000_i64, trades);
+        let oracle = RealTradeOracle::new(by_window);
+
+        // At t=15s (abs_t=1015) → last SELL ≤ 1015 is 0.50
+        let (bid, _) = oracle.price_at(&window, 15);
+        assert_eq!(bid, dec!(0.50));
+
+        // At t=25s (abs_t=1025) → last SELL ≤ 1025 is 0.45
+        let (bid, _) = oracle.price_at(&window, 25);
+        assert_eq!(bid, dec!(0.45));
+    }
+
+    #[test]
+    fn real_oracle_returns_last_buy_as_ask() {
+        let window = make_window(80000.0);
+        let trades = vec![
+            up_trade(1005, TradeSide::Buy, "0.51"),
+            up_trade(1100, TradeSide::Buy, "0.55"),
+        ];
+        let mut by_window = HashMap::new();
+        by_window.insert(1000_i64, trades);
+        let oracle = RealTradeOracle::new(by_window);
+
+        let (_, ask) = oracle.price_at(&window, 50);
+        assert_eq!(ask, dec!(0.51));
+        let (_, ask) = oracle.price_at(&window, 200);
+        assert_eq!(ask, dec!(0.55));
+    }
+
+    #[test]
+    fn real_oracle_falls_back_when_no_qualifying_trade() {
+        let window = make_window(80000.0);
+        // All trades after t=200s
+        let trades = vec![
+            up_trade(1210, TradeSide::Sell, "0.40"),
+            up_trade(1220, TradeSide::Buy, "0.42"),
+        ];
+        let mut by_window = HashMap::new();
+        by_window.insert(1000_i64, trades);
+        let oracle = RealTradeOracle::new(by_window);
+
+        // At t=10s → no trade yet → fallback both sides
+        let (bid, ask) = oracle.price_at(&window, 10);
+        assert_eq!(bid, dec!(0.5));
+        assert_eq!(ask, dec!(0.5));
+    }
+
+    #[test]
+    fn real_oracle_handles_empty_window() {
+        let window = make_window(80000.0);
+        let mut by_window = HashMap::new();
+        by_window.insert(1000_i64, vec![]);
+        let oracle = RealTradeOracle::new(by_window);
+        let (bid, ask) = oracle.price_at(&window, 100);
+        assert_eq!(bid, dec!(0.5));
+        assert_eq!(ask, dec!(0.5));
+    }
+
+    #[test]
+    fn real_oracle_handles_missing_window() {
+        let window = make_window(80000.0); // window_ts = 1000
+        let oracle = RealTradeOracle::new(HashMap::new());
+        let (bid, ask) = oracle.price_at(&window, 100);
+        assert_eq!(bid, dec!(0.5));
+        assert_eq!(ask, dec!(0.5));
+    }
+
+    #[test]
+    fn real_oracle_filters_post_close_trades() {
+        let window = make_window(80000.0); // window_ts = 1000, close at 1300
+        let trades = vec![
+            up_trade(1010, TradeSide::Sell, "0.40"),
+            up_trade(1400, TradeSide::Sell, "0.99"),  // post-close — must be filtered
+        ];
+        let mut by_window = HashMap::new();
+        by_window.insert(1000_i64, trades);
+        let oracle = RealTradeOracle::new(by_window);
+
+        // At t=290s (abs_t=1290), post-close trade at ts=1400 must NOT influence bid.
+        let (bid, _) = oracle.price_at(&window, 290);
+        assert_eq!(bid, dec!(0.40));
+    }
+
+    #[test]
+    fn real_oracle_filters_down_outcome_trades() {
+        let window = make_window(80000.0);
+        let trades = vec![
+            down_trade(1010, TradeSide::Sell, "0.10"),  // DOWN side — irrelevant to UP token
+            up_trade(1015, TradeSide::Sell, "0.55"),
+        ];
+        let mut by_window = HashMap::new();
+        by_window.insert(1000_i64, trades);
+        let oracle = RealTradeOracle::new(by_window);
+
+        let (bid, _) = oracle.price_at(&window, 20);
+        assert_eq!(bid, dec!(0.55));
+    }
+
+    #[test]
+    fn real_oracle_filters_pre_window_trades() {
+        let window = make_window(80000.0); // window_ts = 1000
+        let trades = vec![
+            up_trade(900, TradeSide::Sell, "0.99"),  // pre-window — must be filtered
+            up_trade(1010, TradeSide::Sell, "0.50"),
+        ];
+        let mut by_window = HashMap::new();
+        by_window.insert(1000_i64, trades);
+        let oracle = RealTradeOracle::new(by_window);
+        let (bid, _) = oracle.price_at(&window, 20);
+        assert_eq!(bid, dec!(0.50));
     }
 }
