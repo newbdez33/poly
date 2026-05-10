@@ -1,8 +1,16 @@
 use crate::trader::ladder::Direction;
 use chrono::NaiveDate;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "lowercase")]
+pub enum OracleKind {
+    Bs,
+    Noisy,
+    Real,
+}
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "poly-backtest", about = "Backtest strategies on Polymarket BTC 5min history")]
@@ -44,6 +52,13 @@ pub struct BacktestArgs {
     /// Seed for the noise RNG. Same seed + same sigma = byte-identical run.
     #[arg(long, default_value = "42")]
     pub noise_seed: u64,
+
+    /// Oracle to use for token price simulation.
+    /// `bs` = Black-Scholes theoretical (default; v1.4 behavior).
+    /// `noisy` = BS + Gaussian noise (v1.7.2; respects --oracle-noise).
+    /// `real` = Real Polymarket trade history (v1.7.5; auto-fetches uncached).
+    #[arg(long, value_enum, default_value = "bs")]
+    pub oracle: OracleKind,
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +110,12 @@ pub fn strategy_set() -> Vec<StrategyConfig> {
         common("9_tp85_sl30",             ExitRule::TpSlOrHold { tp_price: dec!(0.85), sl_price: dec!(0.30) }, mart()),
         common("10_tp85_sl25",            ExitRule::TpSlOrHold { tp_price: dec!(0.85), sl_price: dec!(0.25) }, mart()),
         common("11_tp85_sl20",            ExitRule::TpSlOrHold { tp_price: dec!(0.85), sl_price: dec!(0.20) }, mart()),
+        common("12_tp75_early_exit_270",
+            ExitRule::TpOnlyOrEarlyExit { tp_price: dec!(0.75), exit_at_secs: 270 },
+            mart()),
+        common("13_hold_early_exit_270",
+            ExitRule::FixedTime { seconds: 270 },
+            mart()),
     ]
 }
 
@@ -128,22 +149,12 @@ mod tests {
     }
 
     #[test]
-    fn strategy_set_has_eleven_strategies() {
-        let s = strategy_set();
-        assert_eq!(s.len(), 11);
-        let names: Vec<&str> = s.iter().map(|c| c.name.as_str()).collect();
-        assert!(names.contains(&"1_hold_martingale"));
-        assert!(names.contains(&"6_fixed_stake_baseline"));
-        assert!(names.contains(&"11_tp85_sl20"));
-    }
-
-    #[test]
     fn strategy_set_uniqueness() {
         let s = strategy_set();
         let mut names: Vec<&String> = s.iter().map(|c| &c.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 11);
+        assert_eq!(names.len(), 13);
     }
 
     #[test]
@@ -164,8 +175,8 @@ mod tests {
     #[test]
     fn filter_all_returns_everything() {
         let s = strategy_set();
-        assert_eq!(filter_strategies(&s, "all").len(), 11);
-        assert_eq!(filter_strategies(&s, "").len(), 11);
+        assert_eq!(filter_strategies(&s, "all").len(), 13);
+        assert_eq!(filter_strategies(&s, "").len(), 13);
     }
 
     #[test]
@@ -258,5 +269,64 @@ mod tests {
             "--oracle-noise", "0.6",
         ]);
         assert_eq!(a.oracle_noise, 0.6);
+    }
+
+    #[test]
+    fn parses_oracle_default_bs() {
+        let a = parse(&["--start", "2026-04-09", "--end", "2026-05-09"]);
+        assert_eq!(a.oracle, OracleKind::Bs);
+    }
+
+    #[test]
+    fn parses_oracle_real() {
+        let a = parse(&[
+            "--start", "2026-04-09", "--end", "2026-05-09",
+            "--oracle", "real",
+        ]);
+        assert_eq!(a.oracle, OracleKind::Real);
+    }
+
+    #[test]
+    fn parses_oracle_noisy() {
+        let a = parse(&[
+            "--start", "2026-04-09", "--end", "2026-05-09",
+            "--oracle", "noisy",
+        ]);
+        assert_eq!(a.oracle, OracleKind::Noisy);
+    }
+
+    #[test]
+    fn strategy_set_has_thirteen_strategies() {
+        let s = strategy_set();
+        assert_eq!(s.len(), 13);
+    }
+
+    #[test]
+    fn strategy_12_is_tp75_early_exit_270() {
+        let s = strategy_set();
+        let s12 = s.iter().find(|c| c.name == "12_tp75_early_exit_270")
+            .expect("strategy 12 missing");
+        match &s12.exit {
+            ExitRule::TpOnlyOrEarlyExit { tp_price, exit_at_secs } => {
+                assert_eq!(*tp_price, dec!(0.75));
+                assert_eq!(*exit_at_secs, 270);
+            }
+            _ => panic!("strategy 12 should be TpOnlyOrEarlyExit"),
+        }
+        assert!(matches!(s12.stake, StakeRule::Martingale { .. }));
+    }
+
+    #[test]
+    fn strategy_13_is_hold_early_exit_270() {
+        let s = strategy_set();
+        let s13 = s.iter().find(|c| c.name == "13_hold_early_exit_270")
+            .expect("strategy 13 missing");
+        match &s13.exit {
+            ExitRule::FixedTime { seconds } => {
+                assert_eq!(*seconds, 270);
+            }
+            _ => panic!("strategy 13 should be FixedTime {{ seconds: 270 }}"),
+        }
+        assert!(matches!(s13.stake, StakeRule::Martingale { .. }));
     }
 }
