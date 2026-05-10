@@ -11,3 +11,4 @@ pub mod tui;
 pub mod backtest;
 pub mod positions;
 pub mod adapters;
+pub mod positioner;
