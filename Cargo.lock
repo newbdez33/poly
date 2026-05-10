@@ -3771,6 +3771,8 @@ dependencies = [
  "mockall",
  "polymarket_client_sdk_v2",
  "proptest",
+ "rand 0.8.6",
+ "rand_distr",
  "ratatui",
  "reqwest 0.12.28",
  "rust_decimal",
