@@ -48,6 +48,10 @@ pub struct TraderArgs {
     pub reset: bool,
     #[arg(long)]
     pub max_windows: Option<u32>,
+    /// Use limit orders for BUY entry + TP exit. Saves taker fees but may
+    /// skip windows when liquidity is thin. Only valid with --exit-rule tp-sl.
+    #[arg(long)]
+    pub maker: bool,
 }
 
 impl TraderArgs {
@@ -75,6 +79,9 @@ impl TraderArgs {
                 return Err(ConfigError::ExitRuleInvertedThresholds);
             }
         }
+        if self.maker && !matches!(self.exit_rule, ExitRuleArg::TpSl) {
+            return Err(ConfigError::MakerRequiresTpSl);
+        }
         Ok(())
     }
 }
@@ -95,6 +102,8 @@ pub enum ConfigError {
     ExitRuleInvalidThreshold,
     #[error("tp-price must be greater than sl-price")]
     ExitRuleInvertedThresholds,
+    #[error("--maker requires --exit-rule tp-sl")]
+    MakerRequiresTpSl,
 }
 
 #[cfg(test)]
@@ -238,6 +247,44 @@ mod tests {
     fn validate_accepts_tp_sl_full() {
         let a = parse(&["--direction", "up", "--exit-rule", "tp-sl",
                         "--tp-price", "0.85", "--sl-price", "0.45"]);
+        assert!(a.validate().is_ok());
+    }
+
+    #[test]
+    fn parses_maker_flag_off_by_default() {
+        let a = parse(&["--direction", "up"]);
+        assert!(!a.maker);
+    }
+
+    #[test]
+    fn parses_maker_flag_on() {
+        let a = parse(&[
+            "--direction", "up",
+            "--exit-rule", "tp-sl",
+            "--tp-price", "0.85",
+            "--sl-price", "0.45",
+            "--maker",
+        ]);
+        assert!(a.maker);
+    }
+
+    #[test]
+    fn validate_rejects_maker_without_tp_sl() {
+        let mut a = parse(&["--direction", "up"]);
+        a.maker = true;
+        // exit_rule is Hold by default
+        assert_eq!(a.validate(), Err(ConfigError::MakerRequiresTpSl));
+    }
+
+    #[test]
+    fn validate_accepts_maker_with_tp_sl() {
+        let a = parse(&[
+            "--direction", "up",
+            "--exit-rule", "tp-sl",
+            "--tp-price", "0.85",
+            "--sl-price", "0.45",
+            "--maker",
+        ]);
         assert!(a.validate().is_ok());
     }
 }
