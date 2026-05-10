@@ -102,8 +102,11 @@ impl TokenPriceOracle for NoisyBlackScholesOracle {
         if self.sigma == 0.0 {
             return (bid_bs, ask_bs);
         }
-        // Non-zero noise path implemented in Task 3.
-        (bid_bs, ask_bs)
+        let noise = self.noise_dist.sample(&mut *self.rng.lock().unwrap());
+        let noise_dec = Decimal::from_f64(noise).unwrap_or(Decimal::ZERO);
+        let bid = (bid_bs + noise_dec).clamp(dec!(0.01), dec!(0.99));
+        let ask = (ask_bs + noise_dec).clamp(dec!(0.01), dec!(0.99));
+        (bid, ask)
     }
 }
 
@@ -223,5 +226,85 @@ mod tests {
             assert_eq!(bid_b, bid_n, "bid mismatch at t={t}");
             assert_eq!(ask_b, ask_n, "ask mismatch at t={t}");
         }
+    }
+
+    #[test]
+    fn noisy_oracle_seed_42_reproducible() {
+        let btc = make_btc_constant(80000.0);
+        let base1 = BlackScholesOracle::new(btc.clone(), 80.0, 0.0);
+        let base2 = BlackScholesOracle::new(btc, 80.0, 0.0);
+        let n1 = NoisyBlackScholesOracle::new(base1, 0.05, 42);
+        let n2 = NoisyBlackScholesOracle::new(base2, 0.05, 42);
+
+        let window = make_window(80000.0);
+        for t in 0..100u32 {
+            let (b1, a1) = n1.price_at(&window, t);
+            let (b2, a2) = n2.price_at(&window, t);
+            assert_eq!(b1, b2, "bid drift at t={t}");
+            assert_eq!(a1, a2, "ask drift at t={t}");
+        }
+    }
+
+    #[test]
+    fn noisy_oracle_different_seeds_diverge() {
+        let btc = make_btc_constant(80000.0);
+        let base1 = BlackScholesOracle::new(btc.clone(), 80.0, 0.0);
+        let base2 = BlackScholesOracle::new(btc, 80.0, 0.0);
+        let n1 = NoisyBlackScholesOracle::new(base1, 0.05, 42);
+        let n2 = NoisyBlackScholesOracle::new(base2, 0.05, 99);
+
+        let window = make_window(80000.0);
+        // Over 100 calls at least one tick should differ.
+        let mut differs = false;
+        for t in 0..100u32 {
+            let (b1, _) = n1.price_at(&window, t);
+            let (b2, _) = n2.price_at(&window, t);
+            if b1 != b2 { differs = true; break; }
+        }
+        assert!(differs, "different seeds should produce different sequences");
+    }
+
+    #[test]
+    fn noisy_oracle_clamps_to_valid_range() {
+        let btc = make_btc_constant(80000.0);
+        let base = BlackScholesOracle::new(btc, 80.0, 0.0);
+        // Large sigma to force frequent clamps.
+        let noisy = NoisyBlackScholesOracle::new(base, 0.30, 42);
+
+        let window = make_window(80000.0);
+        for t in 0..1000u32 {
+            let (bid, ask) = noisy.price_at(&window, t.min(290));
+            assert!(bid >= dec!(0.01) && bid <= dec!(0.99),
+                    "bid={bid} out of range at t={t}");
+            assert!(ask >= dec!(0.01) && ask <= dec!(0.99),
+                    "ask={ask} out of range at t={t}");
+        }
+    }
+
+    #[test]
+    fn noisy_oracle_mean_near_zero_over_many_samples() {
+        let btc = make_btc_constant(80000.0);
+        // Use friction=0 so base bid/ask both equal the BS midpoint, making
+        // the noise residual easy to extract.
+        let base_for_mean = BlackScholesOracle::new(btc.clone(), 80.0, 0.0);
+        let noisy = NoisyBlackScholesOracle::new(base_for_mean, 0.05, 42);
+
+        let base_ref = BlackScholesOracle::new(btc, 80.0, 0.0);
+        let window = make_window(80000.0);
+
+        let mut residuals = Vec::with_capacity(10_000);
+        for t in 0..10_000u32 {
+            let t_capped = (t % 290).max(1);  // stay inside window
+            let (bid_n, _) = noisy.price_at(&window, t_capped);
+            let (bid_b, _) = base_ref.price_at(&window, t_capped);
+            // Using f64 conversion for the assertion; Decimal subtraction works
+            // but mean comparison is easier in f64.
+            let r: f64 = (bid_n - bid_b).to_string().parse().unwrap_or(0.0);
+            residuals.push(r);
+        }
+        let mean = residuals.iter().sum::<f64>() / residuals.len() as f64;
+        // 3-σ bound for σ=0.05 over 10k samples is ±0.05 / sqrt(10000) × 3 ≈ ±0.0015
+        // Loosen to ±0.005 to absorb clamp-induced asymmetry near boundaries.
+        assert!(mean.abs() < 0.005, "noise mean drift: {mean}");
     }
 }
