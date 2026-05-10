@@ -12,3 +12,4 @@ pub mod adapters;
 pub mod price;
 pub mod exit_watcher;
 pub mod order_events;
+pub mod maker;
