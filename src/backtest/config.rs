@@ -34,6 +34,16 @@ pub struct BacktestArgs {
     /// Strategy filter — comma-separated names, or "all"
     #[arg(long, default_value = "all")]
     pub strategies: String,
+
+    /// Stddev of Gaussian noise added to BS theoretical bid/ask. Range
+    /// [0.0, 0.5]. 0.0 = identical to v1.4 baseline. 0.05 ≈ matches
+    /// real-money observed gap-down magnitude.
+    #[arg(long, default_value = "0.0")]
+    pub oracle_noise: f64,
+
+    /// Seed for the noise RNG. Same seed + same sigma = byte-identical run.
+    #[arg(long, default_value = "42")]
+    pub noise_seed: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -162,5 +172,35 @@ mod tests {
     fn filter_unknown_name_returns_empty() {
         let s = strategy_set();
         assert_eq!(filter_strategies(&s, "nonexistent").len(), 0);
+    }
+
+    #[test]
+    fn parses_oracle_noise_default_zero() {
+        let a = parse(&["--start", "2026-04-09", "--end", "2026-05-09"]);
+        assert_eq!(a.oracle_noise, 0.0);
+    }
+
+    #[test]
+    fn parses_oracle_noise_005() {
+        let a = parse(&[
+            "--start", "2026-04-09", "--end", "2026-05-09",
+            "--oracle-noise", "0.05",
+        ]);
+        assert_eq!(a.oracle_noise, 0.05);
+    }
+
+    #[test]
+    fn parses_noise_seed_default_42() {
+        let a = parse(&["--start", "2026-04-09", "--end", "2026-05-09"]);
+        assert_eq!(a.noise_seed, 42);
+    }
+
+    #[test]
+    fn parses_noise_seed_custom() {
+        let a = parse(&[
+            "--start", "2026-04-09", "--end", "2026-05-09",
+            "--noise-seed", "12345",
+        ]);
+        assert_eq!(a.noise_seed, 12345);
     }
 }
