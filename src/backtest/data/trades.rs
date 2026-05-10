@@ -118,6 +118,44 @@ impl TradeFetcher for PolymarketTradeFetcher {
     }
 }
 
+use std::path::{Path, PathBuf};
+
+pub struct CachedTradeStore {
+    root: PathBuf,
+}
+
+impl CachedTradeStore {
+    pub fn new(root: impl Into<PathBuf>) -> Result<Self> {
+        let root = root.into();
+        std::fs::create_dir_all(&root)
+            .map_err(|e| anyhow::anyhow!("creating cache dir {}: {e}", root.display()))?;
+        Ok(Self { root })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    fn path_for(&self, window_ts: i64) -> PathBuf {
+        self.root.join(format!("{window_ts}.json"))
+    }
+
+    pub fn load(&self, window_ts: i64) -> Option<Vec<Trade>> {
+        let path = self.path_for(window_ts);
+        if !path.exists() { return None; }
+        let bytes = std::fs::read(&path).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    pub fn save(&self, window_ts: i64, trades: &[Trade]) -> Result<()> {
+        let path = self.path_for(window_ts);
+        let bytes = serde_json::to_vec(trades)?;
+        std::fs::write(&path, bytes)
+            .map_err(|e| anyhow::anyhow!("writing trades cache {}: {e}", path.display()))?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +241,39 @@ mod tests {
             let back: TradeSide = serde_json::from_str(&s).unwrap();
             assert_eq!(side, back);
         }
+    }
+
+    use tempfile::TempDir;
+
+    fn fixture_trades() -> Vec<Trade> {
+        vec![
+            make_trade(1000, TradeSide::Buy, rust_decimal_macros::dec!(0.42)),
+            make_trade(1001, TradeSide::Sell, rust_decimal_macros::dec!(0.43)),
+        ]
+    }
+
+    #[test]
+    fn cached_trade_store_save_then_load_roundtrips() {
+        let tmp = TempDir::new().unwrap();
+        let store = CachedTradeStore::new(tmp.path()).unwrap();
+        let trades = fixture_trades();
+        store.save(1700000000, &trades).unwrap();
+        let back = store.load(1700000000).unwrap();
+        assert_eq!(back, trades);
+    }
+
+    #[test]
+    fn cached_trade_store_load_returns_none_when_missing() {
+        let tmp = TempDir::new().unwrap();
+        let store = CachedTradeStore::new(tmp.path()).unwrap();
+        assert!(store.load(99999).is_none());
+    }
+
+    #[test]
+    fn cached_trade_store_save_creates_per_window_file() {
+        let tmp = TempDir::new().unwrap();
+        let store = CachedTradeStore::new(tmp.path()).unwrap();
+        store.save(1700000000, &fixture_trades()).unwrap();
+        assert!(tmp.path().join("1700000000.json").exists());
     }
 }
