@@ -17,6 +17,11 @@ pub struct WindowMeta {
     pub price_to_beat: Decimal,   // Open BTC price (priceToBeat)
     pub final_price: Option<Decimal>,  // Close BTC (finalPrice), None if window not settled
     pub winner: Option<Direction>,     // Resolved winner; None if window not closed
+    /// Hex-prefixed market condition_id ("0x..."). Optional for back-compat
+    /// with cached JSON written before v1.7.5 — those deserialize with None
+    /// here. The `--oracle real` path skips windows where this is None.
+    #[serde(default)]
+    pub condition_id: Option<String>,
 }
 
 pub struct GammaHistoryFetcher {
@@ -135,6 +140,12 @@ pub fn decode_window_meta(json: &str, window_ts: i64) -> Result<Option<WindowMet
         None
     };
 
+    let condition_id = market.and_then(|m| {
+        m.get("conditionId")
+            .and_then(|c| c.as_str())
+            .map(|s| s.to_string())
+    });
+
     if winner.is_none() {
         // Window exists but isn't fully settled — skip in backtest
         return Ok(None);
@@ -145,6 +156,7 @@ pub fn decode_window_meta(json: &str, window_ts: i64) -> Result<Option<WindowMet
         price_to_beat,
         final_price,
         winner,
+        condition_id,
     }))
 }
 
@@ -230,5 +242,54 @@ mod tests {
             }]
         }]"#;
         assert!(decode_window_meta(json, 0).unwrap().is_none());
+    }
+
+    #[test]
+    fn decode_extracts_condition_id() {
+        let json = r#"[{
+            "eventMetadata": {"priceToBeat": 80424.78, "finalPrice": 80450.0},
+            "markets":[{
+                "slug":"x","closed":true,"umaResolutionStatus":"resolved",
+                "conditionId":"0x16b6deeed0603035fe1fab25c868f60fc5e7ac5e761dd4a15d34eb897dbbfa49",
+                "outcomes":"[\"Up\",\"Down\"]",
+                "clobTokenIds":"[\"u\",\"d\"]",
+                "outcomePrices":"[\"1\",\"0\"]"
+            }]
+        }]"#;
+        let m = decode_window_meta(json, 1700000000).unwrap().unwrap();
+        assert_eq!(
+            m.condition_id.as_deref(),
+            Some("0x16b6deeed0603035fe1fab25c868f60fc5e7ac5e761dd4a15d34eb897dbbfa49")
+        );
+    }
+
+    #[test]
+    fn decode_missing_condition_id_returns_none() {
+        let json = r#"[{
+            "eventMetadata": {"priceToBeat": 80424.78, "finalPrice": 80450.0},
+            "markets":[{
+                "slug":"x","closed":true,"umaResolutionStatus":"resolved",
+                "outcomes":"[\"Up\",\"Down\"]",
+                "clobTokenIds":"[\"u\",\"d\"]",
+                "outcomePrices":"[\"1\",\"0\"]"
+            }]
+        }]"#;
+        let m = decode_window_meta(json, 1700000000).unwrap().unwrap();
+        assert!(m.condition_id.is_none());
+    }
+
+    #[test]
+    fn windowmeta_deserializes_legacy_json_without_condition_id() {
+        // Real on-disk legacy cache files use lowercase "up"/"down" because
+        // `Direction` is `#[serde(rename_all = "lowercase")]`.
+        let json = r#"{
+            "window_ts": 1700000000,
+            "price_to_beat": "80424.78",
+            "final_price": "80450",
+            "winner": "up"
+        }"#;
+        let m: WindowMeta = serde_json::from_str(json).unwrap();
+        assert!(m.condition_id.is_none());
+        assert_eq!(m.window_ts, 1700000000);
     }
 }

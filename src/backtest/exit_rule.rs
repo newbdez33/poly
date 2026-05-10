@@ -103,6 +103,7 @@ mod tests {
             price_to_beat: dec!(80000),
             final_price: Some(dec!(80050)),
             winner: Some(winner),
+            condition_id: None,
         }
     }
 

@@ -123,6 +123,7 @@ mod tests {
             price_to_beat: Decimal::from_f64(price_to_beat).unwrap(),
             final_price: None,
             winner: Some(Direction::Up),
+            condition_id: None,
         }
     }
 
