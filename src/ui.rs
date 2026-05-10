@@ -26,6 +26,9 @@ pub struct UiState {
     pub trader_health: TraderHealth,
     pub market: Option<MarketState>,
     pub positions: Option<Positions>,
+    /// Trading window length in minutes. Drives the BTC strip's countdown.
+    /// {5, 15, 60}.
+    pub window_minutes: u32,
 }
 
 pub fn render(frame: &mut Frame, state: &UiState) {
@@ -463,6 +466,7 @@ mod tests {
             trader_health: health,
             market: None,
             positions: None,
+            window_minutes: 5,
         }
     }
 
@@ -484,6 +488,7 @@ mod tests {
             trader_health: TraderHealth::NotStarted,
             market,
             positions: None,
+            window_minutes: 5,
         }
     }
 
@@ -581,6 +586,7 @@ mod tests {
             trader_health: TraderHealth::NotStarted,
             market: None,
             positions: None,
+            window_minutes: 5,
         };
         let out = render_to_buffer(&state);
         insta::assert_snapshot!("ui_with_balance", out);
@@ -600,6 +606,7 @@ mod tests {
             trader_health: TraderHealth::NotStarted,
             market: None,
             positions: None,
+            window_minutes: 5,
         };
         let out = render_to_buffer(&state);
         insta::assert_snapshot!("ui_no_balance", out);
@@ -625,6 +632,7 @@ mod tests {
             trader_health: TraderHealth::NotStarted,
             market: None,
             positions: None,
+            window_minutes: 5,
         };
         let out = render_to_buffer(&state);
         insta::assert_snapshot!("ui_failure", out);
@@ -721,6 +729,7 @@ mod tests {
             trader_health: TraderHealth::NotStarted,
             market: None,
             positions,
+            window_minutes: 5,
         }
     }
 

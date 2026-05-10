@@ -35,6 +35,12 @@ pub struct AppState {
     pub trader_health: TraderHealth,
     pub market: Option<MarketState>,
     pub positions: Option<Positions>,
+    /// Trading window length in minutes. Auto-detected from TraderEvent.ladder
+    /// (default 5 if no trader is running).
+    pub window_minutes: u32,
+    /// mpsc sender to push window_minutes changes to the market_watch task.
+    /// `None` in tests (no market_watch task wired).
+    pub window_minutes_tx: Option<mpsc::Sender<u32>>,
 }
 
 impl AppState {
@@ -50,6 +56,8 @@ impl AppState {
             trader_health: TraderHealth::NotStarted,
             market: None,
             positions: None,
+            window_minutes: 5,
+            window_minutes_tx: None,
         }
     }
 
@@ -68,6 +76,7 @@ impl AppState {
             trader_health: self.trader_health,
             market: self.market.clone(),
             positions: self.positions.clone(),
+            window_minutes: self.window_minutes,
         }
     }
 }
@@ -84,6 +93,13 @@ pub fn handle_event(state: &mut AppState, ev: AppEvent, cmd_tx: &mpsc::Sender<Cm
             _ => {}
         },
         AppEvent::TraderEvent(ev) => {
+            // Detect window_minutes change from trader, push to market_watch.
+            if state.window_minutes != ev.ladder.window_minutes {
+                state.window_minutes = ev.ladder.window_minutes;
+                if let Some(tx) = &state.window_minutes_tx {
+                    let _ = tx.try_send(ev.ladder.window_minutes);
+                }
+            }
             if state.trader_log.len() >= 64 {
                 state.trader_log.pop_front();
             }
@@ -393,5 +409,30 @@ mod tests {
         let p = Positions { items: vec![], fetched_at: chrono::Utc::now() };
         handle_event(&mut state, AppEvent::PositionsUpdate(p.clone()), &cmd_tx);
         assert_eq!(state.positions, Some(p));
+    }
+
+    #[tokio::test]
+    async fn handle_event_updates_window_minutes_from_trader_event() {
+        use crate::trader::ladder::{LadderState, Direction};
+        use crate::trader::event::{TraderEvent, TraderEventKind};
+
+        let mut state = AppState::new(Duration::from_secs(30));
+        let (cmd_tx, _cmd_rx) = mpsc::channel(8);
+        let (mins_tx, mut mins_rx) = mpsc::channel::<u32>(8);
+        state.window_minutes_tx = Some(mins_tx);
+
+        let ladder = LadderState::new(Direction::Up, Decimal::from(5), 5, chrono::Utc::now())
+            .with_window_minutes(15);
+        let ev = TraderEvent {
+            ts: chrono::Utc::now(),
+            session_id: ladder.session_id,
+            kind: TraderEventKind::SessionStarted,
+            ladder,
+        };
+        handle_event(&mut state, AppEvent::TraderEvent(ev), &cmd_tx);
+
+        assert_eq!(state.window_minutes, 15);
+        let pushed = mins_rx.try_recv().unwrap();
+        assert_eq!(pushed, 15);
     }
 }
