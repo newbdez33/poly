@@ -17,7 +17,13 @@ impl From<DirectionArg> for Direction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "kebab-case")]
-pub enum ExitRuleArg { Hold, TpSl }
+pub enum ExitRuleArg {
+    Hold,
+    TpSl,
+    /// v1.8: Hold position, then market-sell at `--exit-at-secs`. Avoids
+    /// resolution path entirely (no on-chain redeem; no MATIC needed).
+    HoldEarlyExit,
+}
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "poly-trader",
@@ -40,6 +46,12 @@ pub struct TraderArgs {
     pub tp_price: Option<Decimal>,
     #[arg(long)]
     pub sl_price: Option<Decimal>,
+    /// Seconds into the window at which to market-sell. Required when
+    /// --exit-rule is hold-early-exit. Rejected for other exit rules.
+    /// Range: 1..=(window_seconds - 30) to ensure the orderbook is still
+    /// active. Backtest-validated default: 270 (for 5-min windows).
+    #[arg(long)]
+    pub exit_at_secs: Option<u32>,
     #[arg(long, default_value = "5")]
     pub poll_secs: u32,
     #[arg(long)]
@@ -87,6 +99,20 @@ impl TraderArgs {
                 return Err(ConfigError::ExitRuleInvertedThresholds);
             }
         }
+        let window_seconds = (self.window_minutes as u32) * 60;
+        match self.exit_rule {
+            ExitRuleArg::HoldEarlyExit => {
+                let secs = self.exit_at_secs.ok_or(ConfigError::ExitAtSecsRequired)?;
+                if secs == 0 || secs > window_seconds.saturating_sub(30) {
+                    return Err(ConfigError::ExitAtSecsOutOfRange);
+                }
+            }
+            _ => {
+                if self.exit_at_secs.is_some() {
+                    return Err(ConfigError::ExitAtSecsWrongMode);
+                }
+            }
+        }
         if self.maker && !matches!(self.exit_rule, ExitRuleArg::TpSl) {
             return Err(ConfigError::MakerRequiresTpSl);
         }
@@ -114,6 +140,12 @@ pub enum ConfigError {
     MakerRequiresTpSl,
     #[error("window-minutes must be 5, 15, or 60")]
     InvalidWindowMinutes,
+    #[error("--exit-rule hold-early-exit requires --exit-at-secs")]
+    ExitAtSecsRequired,
+    #[error("--exit-at-secs only valid with --exit-rule hold-early-exit")]
+    ExitAtSecsWrongMode,
+    #[error("--exit-at-secs must be in 1..=(window-seconds - 30)")]
+    ExitAtSecsOutOfRange,
 }
 
 #[cfg(test)]
@@ -333,6 +365,85 @@ mod tests {
     #[test]
     fn validate_accepts_window_minutes_15() {
         let a = parse(&["--direction", "up", "--window-minutes", "15"]);
+        assert!(a.validate().is_ok());
+    }
+
+    #[test]
+    fn parses_exit_rule_hold_early_exit_with_secs() {
+        let a = parse(&[
+            "--direction", "up",
+            "--exit-rule", "hold-early-exit",
+            "--exit-at-secs", "270",
+        ]);
+        assert_eq!(a.exit_rule, ExitRuleArg::HoldEarlyExit);
+        assert_eq!(a.exit_at_secs, Some(270));
+        assert!(a.validate().is_ok());
+    }
+
+    #[test]
+    fn parses_exit_at_secs_default_is_none() {
+        let a = parse(&["--direction", "up"]);
+        assert_eq!(a.exit_at_secs, None);
+    }
+
+    #[test]
+    fn validate_rejects_hold_early_exit_without_secs() {
+        let mut a = parse(&["--direction", "up", "--exit-rule", "hold-early-exit"]);
+        a.exit_at_secs = None;
+        assert_eq!(a.validate(), Err(ConfigError::ExitAtSecsRequired));
+    }
+
+    #[test]
+    fn validate_rejects_exit_at_secs_zero() {
+        let a = parse(&[
+            "--direction", "up",
+            "--exit-rule", "hold-early-exit",
+            "--exit-at-secs", "0",
+        ]);
+        assert_eq!(a.validate(), Err(ConfigError::ExitAtSecsOutOfRange));
+    }
+
+    #[test]
+    fn validate_rejects_exit_at_secs_too_close_to_close() {
+        // For 5-min window (300s), exit-at-secs must be <= 270 (300 - 30).
+        let a = parse(&[
+            "--direction", "up",
+            "--exit-rule", "hold-early-exit",
+            "--exit-at-secs", "290",
+        ]);
+        assert_eq!(a.validate(), Err(ConfigError::ExitAtSecsOutOfRange));
+    }
+
+    #[test]
+    fn validate_rejects_exit_at_secs_for_non_hold_early_exit() {
+        let a = parse(&[
+            "--direction", "up",
+            "--exit-rule", "hold",
+            "--exit-at-secs", "200",
+        ]);
+        assert_eq!(a.validate(), Err(ConfigError::ExitAtSecsWrongMode));
+    }
+
+    #[test]
+    fn validate_rejects_maker_with_hold_early_exit() {
+        let a = parse(&[
+            "--direction", "up",
+            "--exit-rule", "hold-early-exit",
+            "--exit-at-secs", "270",
+            "--maker",
+        ]);
+        assert_eq!(a.validate(), Err(ConfigError::MakerRequiresTpSl));
+    }
+
+    #[test]
+    fn validate_hold_early_exit_with_15min_window() {
+        // For 15-min window (900s), exit-at-secs must be <= 870 (900 - 30).
+        let a = parse(&[
+            "--direction", "up",
+            "--window-minutes", "15",
+            "--exit-rule", "hold-early-exit",
+            "--exit-at-secs", "870",
+        ]);
         assert!(a.validate().is_ok());
     }
 }
