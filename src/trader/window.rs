@@ -192,8 +192,21 @@ async fn run_hold_early_exit(
         tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
     }
 
+    // Fetch the current bid as a fill-price hint. Real CLOB ignores the hint;
+    // dry-run simulator uses it so PnL reflects the actual mid-window price
+    // (not the hardcoded $0.99 winning-payout default of `sell_market`).
+    let bid = match deps.price.current_bid(token_id).await {
+        Ok(b) => b,
+        Err(e) => {
+            emit_kind(deps, ladder, TraderEventKind::Alert {
+                message: format!("hold-early-exit: bid fetch failed ({e}); selling without hint"),
+            }).await;
+            Decimal::ZERO
+        }
+    };
+
     // Market-sell the entire position at the current bid.
-    let sell_fill = match deps.executor.sell_market(token_id, buy_fill.shares).await {
+    let sell_fill = match deps.executor.sell_at_bid(token_id, buy_fill.shares, bid).await {
         Ok(f) => f,
         Err(e) => {
             emit_kind(deps, ladder, TraderEventKind::SellRejected {
