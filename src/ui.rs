@@ -3,7 +3,7 @@ use crate::domain::{Balance, HealthLed, RefreshStatus};
 use crate::positions::Positions;
 use crate::trader::event::TraderEvent;
 use crate::tui::market_watch::MarketState;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -175,13 +175,23 @@ fn render_trader_log(frame: &mut Frame, area: Rect, state: &UiState) {
         .rev()
         .take(area.height as usize)
         .map(|ev| {
-            let ts = ev.ts.format("%H:%M:%S").to_string();
+            let ts = format_event_timestamp(ev.ts);
             let kind = format_event_kind(&ev.kind);
             Line::from(format!("{ts}  {kind}"))
         })
         .collect();
     let lines: Vec<Line> = lines.into_iter().rev().collect();
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Format an event timestamp as `HH:MM:SS`. Defaults to the system's local
+/// timezone; tests can pin to UTC by setting `POLY_TUI_TZ=utc`.
+fn format_event_timestamp(ts: DateTime<Utc>) -> String {
+    if std::env::var("POLY_TUI_TZ").as_deref() == Ok("utc") {
+        ts.format("%H:%M:%S").to_string()
+    } else {
+        ts.with_timezone(&Local).format("%H:%M:%S").to_string()
+    }
 }
 
 fn format_event_kind(kind: &crate::trader::event::TraderEventKind) -> String {
@@ -410,6 +420,11 @@ mod tests {
     }
 
     fn render_to_buffer(state: &UiState) -> String {
+        // Pin event log to UTC so snapshots are reproducible across machine
+        // timezones. Production runs without this env var → renders Local.
+        // SAFETY: tests are single-threaded by default in this module (no
+        // parallel tests modify this env var); setting it before draw is fine.
+        unsafe { std::env::set_var("POLY_TUI_TZ", "utc"); }
         let backend = TestBackend::new(60, 12);
         let mut term = Terminal::new(backend).unwrap();
         term.draw(|f| render(f, state)).unwrap();
