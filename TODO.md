@@ -108,36 +108,58 @@ Spec: `docs/superpowers/specs/2026-05-10-real-trade-backtest-design.md`. Plan: `
 - [x] 4 unit tests covering: profit/loss/sell-failure/no-resolver
 - [x] README + roadmap docs
 
-**Live solo run (next):** `--direction up --exit-rule hold-early-exit --exit-at-secs 270` for ≥24 hours (~288 windows). Compare PnL vs backtest projection ($0.18/window × 288 = ~$52 expected). Decision after 200 windows:
-- PnL > projection: ship as default; deprecate `hold`.
-- PnL within ±50%: continue monitoring.
-- PnL substantially below: investigate (slippage from order size? band coverage? sell timeout?).
+**Live run #1 (2026-05-12, 12 windows, 1 hour) — RESULTS:**
+
+| Metric | Value |
+|---|---|
+| Realized cash PnL | **+$16.83** (USDC $181.98 → $198.81) |
+| Backtest projection | +$2.16 ($0.18 × 12) |
+| Actual vs projection | **8× over** ✅ |
+| Win rate (non-skip, non-stuck) | 8/8 = 100% (SELL-success windows all won) |
+| Lost windows | 1/12 (8%) |
+| **FAK SELL failure** | **3/12 = 25%** ⚠️ |
+| BUY FoK rejection | 1/12 (8%) |
+| Martingale ladder | Worked (W4 loss → W5 step-2 recovery +$7.07) |
+
+**Major operational finding — FAK SELL fails ~25% of windows.** Originally hypothesized "FAK fails ⇔ loss" (UP bid evaporates when losing), but live run #2 W2 showed **FAK can also fail on winning windows** (winners stop quoting near $1.00 — buyers wait, sellers hold). This means winning + FAK fail → stuck shares needing redeem.
+
+**SOLUTION: Polymarket Auto-Redeem enabled (2026-05-12).** One-time on-chain signature on proxy wallet `0xB1e675F089e1DA863FC8c0f04Fb86653C1A19aa2`. Now winning stuck shares auto-pay to USDC at resolution — no manual redeem, no MATIC needed for ongoing trader operations. **The "stuck winning shares" risk that motivated v1.8.1 GTC fallback is now operationally solved.**
+
+**Live run #2 in progress (96 windows / 8 hours):** Started 2026-05-11 16:08 UTC. Validates whether +$16.83 / hour holds over longer sample.
+
+**Decision rule (after 8h run):**
+- PnL > +$50: ship `hold-early-exit` as default; deprecate `hold`.
+- PnL within ±50% of +$8 backtest projection: continue monitoring.
+- PnL substantially negative: investigate (slippage at higher ladder steps? band coverage? FAK-fail rate spike?).
 
 **Deferred — formal A/B vs v1.1 `hold` baseline** ⏳:
 Compare v1.8 (`hold-early-exit`) against v1.1 (`hold to resolution`) under the SAME market conditions. Two approaches:
 - **Parallel:** two trader processes, same direction, different redis-key prefixes / wallets. Most rigorous — same windows, same volatility.
 - **Shadow:** v1.8 runs live + simulator records "what v1.1 would have done" using the same window data. Zero execution cost; relies on simulator fidelity.
 
-Defer until v1.8 solo run shows positive PnL — no point A/B testing a strategy that's already underperforming backtest. If v1.8 solo PnL ≥ +$52 over 200 windows, then schedule A/B.
+Defer until v1.8 solo run shows positive PnL across ≥96 windows. If +$50+ over 8h then schedule A/B.
 
 **Out of scope (deferred to v1.8.1+):**
 - Maker mode for `hold-early-exit` (saves entry fee but adds limit-order failure path).
-- Strategies 8/9 (`TP=0.85, SL=0.30-0.35`) — higher backtest PnL but require MATIC funding + redeem integration. See v1.9 below.
+- GTC limit fallback when FAK SELL fails (~25% of windows currently). **De-prioritized — Auto-Redeem solves the stuck-winners case operationally.**
+- Strategies 8/9 (`TP=0.85, SL=0.30-0.35`) — higher backtest PnL. See v1.9 below.
 - Dynamic exit time (data-driven choice based on intra-window volatility).
 
 Spec / plan: `docs/superpowers/plans/2026-05-11-trader-hold-early-exit.md`.
 
 ---
 
-## v1.9 — Strategies 8/9 via MATIC + redeem integration ⏳ TODO
+## v1.9 — Strategies 8/9 (TP+SL) revisited ⏳ TODO (unblocked)
 
-v1.7.5 backtest showed `8_tp85_sl35` (+$1,696) and `9_tp85_sl30` (+$1,824) outperform strategy 13 (+$1,505) on real data. Blocked by redeem path: requires MATIC for `redeemPositions` gas. `poly-redeem` CLI exists; needs operator funding + integration into trader (auto-redeem on resolved-winner windows).
+v1.7.5 backtest showed `8_tp85_sl35` (+$1,696) and `9_tp85_sl30` (+$1,824) outperform strategy 13 (+$1,505) on real data. Originally blocked by redeem path requirement; **Auto-Redeem (2026-05-12) removes the blocker** — winning resolutions auto-pay to USDC without operator action.
 
 **Tasks:**
-- [ ] Fund EOA wallet with ~0.5 MATIC (one-time, ~$0.50)
-- [ ] Trader auto-invokes `redeemPositions` on resolved-winner windows (or batched daily by external scheduler)
-- [ ] Validate end-to-end: BUY → hold → resolution → redeem → USDC credit
+- [ ] Trader code: implement `--exit-rule tp-sl-resolution` (or extend existing `tp-sl`) such that on SL trigger we hold to resolution rather than market-sell (since real-data showed SL hit doesn't reliably bank, and Auto-Redeem handles the winning case)
+- [ ] OR: keep existing `tp-sl` semantics and accept SL = market-sell at trigger price (real-data: ~25% FAK fail rate would route to resolution + auto-redeem anyway)
 - [ ] Real-money A/B test strategy 9 vs strategy 13 (v1.8)
+- [ ] Compare net PnL after auto-redeem credits land
+
+**Why unblocked:** Auto-Redeem (enabled 2026-05-12) automatically pays winning stuck shares without MATIC. The 8/9 backtest advantage (+$200-300/30d over strategy 13) is now realizable without redeem operational overhead.
 
 ---
 

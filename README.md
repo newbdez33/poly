@@ -141,7 +141,7 @@ See `TODO.md`. Highlights:
 - **v1.7.1** ✅ — `--window-minutes 5|15|60` flag (TUI auto-detects)
 - **v1.7.2** ✅ — Backtest oracle noise + SL parameter sweep
 - **v1.7.5** ✅ — Real Polymarket trade-history backtest (`--oracle real`, strategies 12/13)
-- **v1.8** ✅ — `--exit-rule hold-early-exit` trader (BUY → wait → market-sell at t=exit-at-secs)
+- **v1.8** ✅ — `--exit-rule hold-early-exit` trader (BUY → wait → market-sell at t=exit-at-secs); pairs with Polymarket Auto-Redeem for stuck-winner recovery
 - **v1.3** — daemon / TUI split. Required before any new trading logic (multi-strategy, dynamic config, etc.)
 - **v1.9+** — MATIC + redeem integration; revisit strategies 8/9 (top backtest performers)
 
@@ -244,7 +244,7 @@ poly-trader --direction up --base 5 \
 - Lower window participation (~5–10% windows skipped due to entry sweep exhausting). Backtest assumed 100% — discount expectation accordingly.
 - Fill detection via 2s polling (≤2s latency vs market order's instant fill).
 
-### v1.8 — `hold-early-exit` (no redemption needed)
+### v1.8 — `hold-early-exit`
 
 ```bash
 poly-trader --direction up \
@@ -252,16 +252,17 @@ poly-trader --direction up \
   --exit-at-secs 270
 ```
 
-Avoids the on-chain `redeemPositions` step entirely. BUY taker at entry, hold the position, then market-sell at `t = exit-at-secs` (max `window_seconds - 30`). For 5-min windows, backtest-validated value is `270`.
+BUY taker at entry, hold the position, then market-sell at `t = exit-at-secs` (max `window_seconds - 30`). For 5-min windows, backtest-validated value is `270`.
 
-**Backtest:** 30-day real-trade replay (`report-real-30d.html`) shows **+$1,505 PnL** over 8503 windows for `13_hold_early_exit_270`, on par with the legacy `1_hold_martingale` baseline. Trade-data freshness check: 99.5% of windows have a SELL trade within 60s before t=270s (median gap = 0s) — execution at the assumed bid is realistic.
+**Backtest:** 30-day real-trade replay (`report-real-30d.html`) shows **+$1,505 PnL** over 8503 windows for `13_hold_early_exit_270`, on par with the legacy `1_hold_martingale` baseline. Trade-data freshness check: 99.5% of windows have a SELL trade within 60s before t=270s (median gap = 0s).
 
-**When to use:**
-- EOA has USDC but no MATIC (can't pay gas for `redeemPositions`).
-- Want deterministic exit time independent of resolution latency.
+**Live run #1 (2026-05-12, 12 windows / 1 hour):** **+$16.83** realized PnL (8× backtest projection). FAK SELL rejection rate: 25% — both losing and winning windows can fail (winners stop quoting near $1.00). See `TODO.md` v1.8 for the operational findings.
 
-**When NOT to use:**
-- Strategies 8/9 (`TP=0.85, SL=0.30-0.35`) actually outperform on real data (+$1,696 to +$1,824). Use those instead if you can fund MATIC + integrate `poly-redeem`.
+**Prerequisite — Auto-Redeem (enabled per-wallet):** Polymarket's "Get Paid Instantly" auto-pays winning stuck shares to USDC at resolution. Enabled via the portfolio UI on first redeem (one-time signature). With Auto-Redeem on, the FAK SELL failure mode (25% of windows) is operationally invisible — stuck winners convert to cash automatically; stuck losers resolve to $0 with no action needed.
+
+**Without Auto-Redeem:** stuck winning shares require `poly-redeem` + MATIC for gas. Auto-Redeem is strictly recommended for live use.
+
+**Alternative — strategies 8/9:** TP=0.85 / SL=0.30-0.35 score higher in backtest (+$1,696 to +$1,824) but require a different exit-rule (v1.9, planned).
 
 | Flag | Valid with | Notes |
 |---|---|---|
