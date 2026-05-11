@@ -74,8 +74,34 @@ impl TradeFetcher for PolymarketTradeFetcher {
                 .offset(offset)
                 .map_err(|e| anyhow::anyhow!("offset out of range: {e}"))?
                 .build();
-            let page = self.client.trades(&req).await
-                .map_err(|e| anyhow::anyhow!("data-api trades error: {e}"))?;
+            // Retry transient errors (timeouts, rate limits) up to 3 times
+            // with exponential backoff. Permanent errors (400 bad request etc.)
+            // still bubble immediately.
+            let mut attempt = 0u32;
+            let page = loop {
+                match self.client.trades(&req).await {
+                    Ok(p) => break p,
+                    Err(e) if attempt < 3 => {
+                        let msg = e.to_string();
+                        // Retry timeouts and rate limits; bail on 400 / 404.
+                        let transient = msg.contains("408") || msg.contains("429")
+                            || msg.contains("500") || msg.contains("502")
+                            || msg.contains("503") || msg.contains("504")
+                            || msg.contains("timed out") || msg.contains("timeout");
+                        if !transient {
+                            return Err(anyhow::anyhow!("data-api trades error: {e}"));
+                        }
+                        attempt += 1;
+                        let backoff = std::time::Duration::from_millis(500 * (1u64 << attempt));
+                        eprintln!(
+                            "[trades] window {} offset {} transient error (attempt {}): {} — retrying in {}ms",
+                            window_ts, offset, attempt, msg, backoff.as_millis()
+                        );
+                        tokio::time::sleep(backoff).await;
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("data-api trades error: {e}")),
+                }
+            };
             let n = page.len();
 
             for sdk in page.into_iter() {
