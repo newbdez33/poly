@@ -108,10 +108,17 @@ Spec: `docs/superpowers/specs/2026-05-10-real-trade-backtest-design.md`. Plan: `
 - [x] 4 unit tests covering: profit/loss/sell-failure/no-resolver
 - [x] README + roadmap docs
 
-**Live A/B test plan (next):** run `--direction up --exit-rule hold-early-exit --exit-at-secs 270` for ≥24 hours (~288 windows). Compare PnL vs backtest projection ($0.18/window × 288 = ~$52 expected). Decision after 200 windows:
+**Live solo run (next):** `--direction up --exit-rule hold-early-exit --exit-at-secs 270` for ≥24 hours (~288 windows). Compare PnL vs backtest projection ($0.18/window × 288 = ~$52 expected). Decision after 200 windows:
 - PnL > projection: ship as default; deprecate `hold`.
 - PnL within ±50%: continue monitoring.
 - PnL substantially below: investigate (slippage from order size? band coverage? sell timeout?).
+
+**Deferred — formal A/B vs v1.1 `hold` baseline** ⏳:
+Compare v1.8 (`hold-early-exit`) against v1.1 (`hold to resolution`) under the SAME market conditions. Two approaches:
+- **Parallel:** two trader processes, same direction, different redis-key prefixes / wallets. Most rigorous — same windows, same volatility.
+- **Shadow:** v1.8 runs live + simulator records "what v1.1 would have done" using the same window data. Zero execution cost; relies on simulator fidelity.
+
+Defer until v1.8 solo run shows positive PnL — no point A/B testing a strategy that's already underperforming backtest. If v1.8 solo PnL ≥ +$52 over 200 windows, then schedule A/B.
 
 **Out of scope (deferred to v1.8.1+):**
 - Maker mode for `hold-early-exit` (saves entry fee but adds limit-order failure path).
