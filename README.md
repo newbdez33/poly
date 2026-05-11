@@ -141,8 +141,9 @@ See `TODO.md`. Highlights:
 - **v1.7.1** ✅ — `--window-minutes 5|15|60` flag (TUI auto-detects)
 - **v1.7.2** ✅ — Backtest oracle noise + SL parameter sweep
 - **v1.7.5** ✅ — Real Polymarket trade-history backtest (`--oracle real`, strategies 12/13)
+- **v1.8** ✅ — `--exit-rule hold-early-exit` trader (BUY → wait → market-sell at t=exit-at-secs)
 - **v1.3** — daemon / TUI split. Required before any new trading logic (multi-strategy, dynamic config, etc.)
-- **v1.8+** — strategy selection driven by v1.4 backtest, markets, observability
+- **v1.9+** — MATIC + redeem integration; revisit strategies 8/9 (top backtest performers)
 
 ## Documentation
 
@@ -242,6 +243,30 @@ poly-trader --direction up --base 5 \
 - Requires Polymarket maker-fee structure for actual savings. If maker == taker, v1.7 == v1.5 cost.
 - Lower window participation (~5–10% windows skipped due to entry sweep exhausting). Backtest assumed 100% — discount expectation accordingly.
 - Fill detection via 2s polling (≤2s latency vs market order's instant fill).
+
+### v1.8 — `hold-early-exit` (no redemption needed)
+
+```bash
+poly-trader --direction up \
+  --exit-rule hold-early-exit \
+  --exit-at-secs 270
+```
+
+Avoids the on-chain `redeemPositions` step entirely. BUY taker at entry, hold the position, then market-sell at `t = exit-at-secs` (max `window_seconds - 30`). For 5-min windows, backtest-validated value is `270`.
+
+**Backtest:** 30-day real-trade replay (`report-real-30d.html`) shows **+$1,505 PnL** over 8503 windows for `13_hold_early_exit_270`, on par with the legacy `1_hold_martingale` baseline. Trade-data freshness check: 99.5% of windows have a SELL trade within 60s before t=270s (median gap = 0s) — execution at the assumed bid is realistic.
+
+**When to use:**
+- EOA has USDC but no MATIC (can't pay gas for `redeemPositions`).
+- Want deterministic exit time independent of resolution latency.
+
+**When NOT to use:**
+- Strategies 8/9 (`TP=0.85, SL=0.30-0.35`) actually outperform on real data (+$1,696 to +$1,824). Use those instead if you can fund MATIC + integrate `poly-redeem`.
+
+| Flag | Valid with | Notes |
+|---|---|---|
+| `--exit-rule hold-early-exit` | (new) | Requires `--exit-at-secs`. Rejects `--maker`. |
+| `--exit-at-secs <u32>` | only with `hold-early-exit` | Range: 1..=(window_seconds - 30). No default — must specify explicitly. |
 
 ### Window length (v1.7.1, 5/15/60 min)
 

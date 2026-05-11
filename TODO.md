@@ -97,20 +97,40 @@ Spec: `docs/superpowers/specs/2026-05-10-real-trade-backtest-design.md`. Plan: `
 
 ---
 
-## v1.8 — `--exit-rule tp-only` trader candidate ⏳ TODO (NEXT — gated by v1.7.5 real-trade results)
+## v1.8 — `--exit-rule hold-early-exit` ✅ COMPLETE
 
-**Decision (2026-05-10):** Strategy 4 abandoned. Two surviving candidates: `1_hold_martingale` (already implemented as `--exit-rule hold` default) and `2_tp_only_martingale` (this work).
+**Pivot from earlier draft (2026-05-10):** Originally planned `--exit-rule tp-only` (strategy 2). v1.7.5 real-trade backtest reversed that — strategy 12 (`tp-only + early-exit`) LOSES money, but strategy 13 (`hold + early-exit at t=270s`) earns **+$1,505 over 8503 windows**. v1.8 implements strategy 13: BUY taker → hold → market-sell at `--exit-at-secs`. Avoids the MATIC redemption blocker entirely.
 
-**Goal:** Add `tp-only` variant to `--exit-rule {hold|tp-sl|tp-only}`. Place limit BUY at entry, place limit TP at `--tp-price` (try 0.75 first per `2_tp_only_martingale`), no SL. If TP doesn't fire, hold to resolution. Maker mode applies (limit BUY + limit TP).
+**Implemented:**
+- [x] `ExitRuleArg::HoldEarlyExit` variant + `--exit-at-secs <u32>` flag
+- [x] Validation: required when `hold-early-exit`; rejected otherwise; range `1..=(window_seconds - 30)`
+- [x] `run_hold_early_exit` window path: BUY → `tokio::time::sleep` → `sell_market`
+- [x] 4 unit tests covering: profit/loss/sell-failure/no-resolver
+- [x] README + roadmap docs
 
-**Scope:**
-- [ ] `src/trader/config.rs` — extend `ExitRuleArg` enum with `TpOnly`. Validate `tp-only` requires `--tp-price`, rejects `--sl-price`.
-- [ ] `src/trader/maker.rs` — fork `sell_with_tp_sl` into `sell_with_tp_only`: same TP limit logic, no SL price-watch arm. Falls through to resolution path on TP miss.
-- [ ] `src/trader/window.rs` — dispatch `tp-only` → `run_maker_tp_only` (or extend `run_maker` with `Option<sl_price>`).
-- [ ] Test: TP fills → Won. TP doesn't fire → winner-sweep at resolution.
-- [ ] Real-money A/B test `tp-only` vs `hold` under same window count.
+**Live A/B test plan (next):** run `--direction up --exit-rule hold-early-exit --exit-at-secs 270` for ≥24 hours (~288 windows). Compare PnL vs backtest projection ($0.18/window × 288 = ~$52 expected). Decision after 200 windows:
+- PnL > projection: ship as default; deprecate `hold`.
+- PnL within ±50%: continue monitoring.
+- PnL substantially below: investigate (slippage from order size? band coverage? sell timeout?).
 
-Estimated work: ~1.5 hours (reuses v1.7 maker infrastructure).
+**Out of scope (deferred to v1.8.1+):**
+- Maker mode for `hold-early-exit` (saves entry fee but adds limit-order failure path).
+- Strategies 8/9 (`TP=0.85, SL=0.30-0.35`) — higher backtest PnL but require MATIC funding + redeem integration. See v1.9 below.
+- Dynamic exit time (data-driven choice based on intra-window volatility).
+
+Spec / plan: `docs/superpowers/plans/2026-05-11-trader-hold-early-exit.md`.
+
+---
+
+## v1.9 — Strategies 8/9 via MATIC + redeem integration ⏳ TODO
+
+v1.7.5 backtest showed `8_tp85_sl35` (+$1,696) and `9_tp85_sl30` (+$1,824) outperform strategy 13 (+$1,505) on real data. Blocked by redeem path: requires MATIC for `redeemPositions` gas. `poly-redeem` CLI exists; needs operator funding + integration into trader (auto-redeem on resolved-winner windows).
+
+**Tasks:**
+- [ ] Fund EOA wallet with ~0.5 MATIC (one-time, ~$0.50)
+- [ ] Trader auto-invokes `redeemPositions` on resolved-winner windows (or batched daily by external scheduler)
+- [ ] Validate end-to-end: BUY → hold → resolution → redeem → USDC credit
+- [ ] Real-money A/B test strategy 9 vs strategy 13 (v1.8)
 
 ---
 
