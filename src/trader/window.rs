@@ -10,6 +10,7 @@ use crate::trader::order_events::OrderEventStream;
 use crate::trader::price::MidwindowPriceFetcher;
 use crate::trader::resolver::{Resolution, WindowResolver};
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use std::sync::Arc;
 
 pub struct WindowDeps {
@@ -215,7 +216,23 @@ async fn run_hold_early_exit(
             emit_kind(deps, ladder, TraderEventKind::Alert {
                 message: format!("hold-early-exit sell failed; shares stuck for token {token_id}"),
             }).await;
-            return WindowOutcome::Won { proceeds_usd: Decimal::ZERO };
+            // FAK SELL failed → shares stuck awaiting resolution. Use the
+            // current bid as the outcome signal:
+            //   - bid > 0.5 → window is leaning UP (we picked UP). Will likely
+            //     resolve UP-winner; Auto-Redeem credits ~shares × $1.00.
+            //     Emit Won so Martingale ladder does NOT escalate.
+            //   - bid ≤ 0.5 → window is leaning DOWN. Will likely resolve $0.
+            //     Emit Lost so Martingale escalates stake on the next window.
+            //
+            // The estimated proceeds for Won (shares × bid) is a best-guess
+            // for `realized_pnl_usd` accounting — Auto-Redeem actually pays
+            // shares × $1.00, so this slightly under-counts wins. The ladder
+            // FSM only cares about Won-vs-Lost branching, not the magnitude.
+            return if bid > dec!(0.5) {
+                WindowOutcome::Won { proceeds_usd: buy_fill.shares * bid }
+            } else {
+                WindowOutcome::Lost { spent_usd: buy_fill.dollars }
+            };
         }
     };
     emit_kind(deps, ladder, TraderEventKind::SellFilled {
@@ -1076,7 +1093,9 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn hold_early_exit_sell_failure_emits_alert() {
+    async fn hold_early_exit_sell_failure_low_bid_emits_lost_for_martingale() {
+        // Bid low (= UP losing) + FAK fail → emit Lost so Martingale escalates.
+        // Auto-Redeem won't pay anything on a loser.
         let window_ts = chrono::Utc::now().timestamp();
         let market = open_market_at("0.50", "0.50");
         let emitter = CapturingEmitter::new();
@@ -1092,7 +1111,7 @@ mod tests {
             ),
             resolver: StubResolver::timeout(),
             emitter: emitter.clone(),
-            price: stub_price("0.50"),
+            price: stub_price("0.10"),  // low bid → likely losing
             events: stub_events(),
         };
 
@@ -1103,11 +1122,58 @@ mod tests {
         tokio::time::advance(std::time::Duration::from_secs(5)).await;
         let outcome = task.await.unwrap();
 
-        // Convention from v1.1 winner_sweep: failed sell returns
-        // Won { proceeds_usd: 0 } so the FSM doesn't escalate stake.
-        assert!(matches!(outcome,
-            WindowOutcome::Won { ref proceeds_usd } if *proceeds_usd == Decimal::ZERO
-        ), "got {outcome:?}");
+        // bid 0.10 ≤ 0.5 → Lost { spent_usd: $5 } so Martingale escalates next.
+        match outcome {
+            WindowOutcome::Lost { spent_usd } => {
+                assert_eq!(spent_usd, Decimal::from(5));
+            }
+            _ => panic!("expected Lost (low bid signals loss), got {outcome:?}"),
+        }
+
+        let kinds = emitter.kinds();
+        assert!(kinds.iter().any(|k| matches!(k, TraderEventKind::SellRejected { .. })),
+                "missing SellRejected");
+        assert!(kinds.iter().any(|k| matches!(k, TraderEventKind::Alert { .. })),
+                "missing Alert");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hold_early_exit_sell_failure_high_bid_emits_won_for_no_escalation() {
+        // Bid high (= UP winning) + FAK fail → emit Won so Martingale stays
+        // at step 1. Auto-Redeem will collect ~shares × $1.00 at resolution.
+        let window_ts = chrono::Utc::now().timestamp();
+        let market = open_market_at("0.50", "0.50");
+        let emitter = CapturingEmitter::new();
+        let deps = WindowDeps {
+            market: StubMarket::ok(market),
+            executor: StubExec::buy_then_sell(
+                Ok(FillResult {
+                    fill_price: Decimal::from_str("0.50").unwrap(),
+                    shares: Decimal::from(10),
+                    dollars: Decimal::from(5),
+                }),
+                Err(ExecError::FillOrKillFailed),
+            ),
+            resolver: StubResolver::timeout(),
+            emitter: emitter.clone(),
+            price: stub_price("0.99"),  // high bid → likely winning
+            events: stub_events(),
+        };
+
+        let cfg = cfg_with_early_exit(2);
+        let task = tokio::spawn(async move {
+            run_window(&deps, &cfg, &fresh_ladder(), window_ts).await
+        });
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        let outcome = task.await.unwrap();
+
+        // bid 0.99 > 0.5 → Won with proceeds = shares × bid = 10 × 0.99 = $9.90
+        match outcome {
+            WindowOutcome::Won { proceeds_usd } => {
+                assert_eq!(proceeds_usd, Decimal::from_str("9.90").unwrap());
+            }
+            _ => panic!("expected Won (high bid signals win), got {outcome:?}"),
+        }
 
         let kinds = emitter.kinds();
         assert!(kinds.iter().any(|k| matches!(k, TraderEventKind::SellRejected { .. })),
