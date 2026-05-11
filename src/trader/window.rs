@@ -25,6 +25,9 @@ pub struct WindowConfig {
     pub band_min: Decimal,
     pub band_max: Decimal,
     pub exit: Option<ExitConfig>,
+    /// v1.8: seconds into the window at which to market-sell.
+    /// Mutually exclusive with `exit` — at most one is `Some`.
+    pub exit_at_secs: Option<u32>,
     pub maker: bool,
     /// Window length in seconds (300/900/3600 for {5,15,60}-min). Threaded
     /// into `run_maker` so its cancel deadline scales with window length.
@@ -424,6 +427,7 @@ mod tests {
             band_min: Decimal::from_str("0.45").unwrap(),
             band_max: Decimal::from_str("0.55").unwrap(),
             exit: None,
+            exit_at_secs: None,
             maker: false,
             window_seconds: 300,
         }
@@ -434,6 +438,7 @@ mod tests {
             band_min: Decimal::from_str("0.45").unwrap(),
             band_max: Decimal::from_str("0.55").unwrap(),
             exit: Some(exit),
+            exit_at_secs: None,
             maker: false,
             window_seconds: 300,
         }
@@ -452,6 +457,7 @@ mod tests {
             band_min: Decimal::from_str("0.45").unwrap(),
             band_max: Decimal::from_str("0.55").unwrap(),
             exit: None,
+            exit_at_secs: None,
             maker: false,
             window_seconds: 900,
         };
@@ -889,6 +895,7 @@ mod tests {
                 sl_price: Decimal::from_str("0.45").unwrap(),
                 poll: std::time::Duration::from_millis(50),
             }),
+            exit_at_secs: None,
             maker: true,
             window_seconds: 300,
         };

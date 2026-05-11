@@ -145,6 +145,7 @@ async fn main() -> Result<()> {
     });
     let exit_cfg = match args.exit_rule {
         ExitRuleArg::Hold => None,
+        ExitRuleArg::HoldEarlyExit => None,
         ExitRuleArg::TpSl => Some(ExitConfig {
             tp_price: args.tp_price.expect("validated: --tp-price required"),
             sl_price: args.sl_price.expect("validated: --sl-price required"),
@@ -155,6 +156,7 @@ async fn main() -> Result<()> {
         band_min: args.band_min,
         band_max: args.band_max,
         exit: exit_cfg,
+        exit_at_secs: args.exit_at_secs,
         maker: args.maker,
         window_seconds,
     };
