@@ -135,6 +135,12 @@ pub async fn run_window(
     }).await;
 
     // Step 4: branch on exit rule
+    if let Some(exit_at_secs) = cfg.exit_at_secs {
+        return run_hold_early_exit(
+            deps, ladder, &market, &token_id, &buy_fill,
+            exit_at_secs, window_ts, cfg.window_seconds,
+        ).await;
+    }
     match &cfg.exit {
         None => {
             // v1.1 path: hold to resolution, sell winner
@@ -159,6 +165,55 @@ async fn await_resolution_and_sweep(
 ) -> WindowOutcome {
     let r = deps.resolver.await_resolution(market).await;
     winner_sweep(deps, ladder, token_id, buy_fill, r).await
+}
+
+/// v1.8 path: hold, then market-sell at t = exit_at_secs into the window.
+/// No resolver wait, no redemption — avoids the MATIC redeem blocker.
+async fn run_hold_early_exit(
+    deps: &WindowDeps,
+    ladder: &LadderState,
+    _market: &WindowMarket,
+    token_id: &str,
+    buy_fill: &FillResult,
+    exit_at_secs: u32,
+    window_ts: i64,
+    window_seconds: i64,
+) -> WindowOutcome {
+    let now = chrono::Utc::now().timestamp();
+    let deadline = window_ts + exit_at_secs as i64;
+    let wait_secs = (deadline - now).max(0) as u64;
+
+    // Hard cap: don't sleep past window close. Defensive — validate() should
+    // reject exit_at_secs > window_seconds - 30 already.
+    let cap = (window_seconds - 30).max(0) as u64;
+    let wait_secs = wait_secs.min(cap);
+
+    if wait_secs > 0 {
+        tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+    }
+
+    // Market-sell the entire position at the current bid.
+    let sell_fill = match deps.executor.sell_market(token_id, buy_fill.shares).await {
+        Ok(f) => f,
+        Err(e) => {
+            emit_kind(deps, ladder, TraderEventKind::SellRejected {
+                reason: format!("{e}"),
+            }).await;
+            emit_kind(deps, ladder, TraderEventKind::Alert {
+                message: format!("hold-early-exit sell failed; shares stuck for token {token_id}"),
+            }).await;
+            return WindowOutcome::Won { proceeds_usd: Decimal::ZERO };
+        }
+    };
+    emit_kind(deps, ladder, TraderEventKind::SellFilled {
+        proceeds_usd: sell_fill.dollars,
+    }).await;
+
+    if sell_fill.dollars > buy_fill.dollars {
+        WindowOutcome::Won { proceeds_usd: sell_fill.dollars }
+    } else {
+        WindowOutcome::Lost { spent_usd: buy_fill.dollars - sell_fill.dollars }
+    }
 }
 
 /// Shared post-resolution path: handle Timeout/error, on win sell market,
@@ -904,5 +959,191 @@ mod tests {
         let kinds = emitter.kinds();
         assert!(kinds.iter().any(|k| matches!(k, TraderEventKind::BuyLimitPosted { .. })),
                 "maker route must emit BuyLimitPosted; events: {kinds:?}");
+    }
+
+    fn cfg_with_early_exit(exit_at_secs: u32) -> WindowConfig {
+        WindowConfig {
+            band_min: Decimal::from_str("0.45").unwrap(),
+            band_max: Decimal::from_str("0.55").unwrap(),
+            exit: None,
+            exit_at_secs: Some(exit_at_secs),
+            maker: false,
+            window_seconds: 300,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hold_early_exit_sells_at_deadline_with_profit() {
+        // Use window_ts = now so wait = exit_at_secs seconds of tokio time.
+        let window_ts = chrono::Utc::now().timestamp();
+        let market = open_market_at("0.50", "0.50");
+        let emitter = CapturingEmitter::new();
+        let deps = WindowDeps {
+            market: StubMarket::ok(market),
+            executor: StubExec::buy_then_sell(
+                Ok(FillResult {
+                    fill_price: Decimal::from_str("0.50").unwrap(),
+                    shares: Decimal::from(10),
+                    dollars: Decimal::from(5),
+                }),
+                Ok(FillResult {
+                    fill_price: Decimal::from_str("0.55").unwrap(),
+                    shares: Decimal::from(10),
+                    dollars: Decimal::from_str("5.50").unwrap(),
+                }),
+            ),
+            // Resolver is never invoked on this path — give it timeout to surface
+            // any accidental call as a failure.
+            resolver: StubResolver::timeout(),
+            emitter: emitter.clone(),
+            price: stub_price("0.55"),
+            events: stub_events(),
+        };
+
+        let cfg = cfg_with_early_exit(2); // 2-second deadline (small for tests)
+
+        let task = tokio::spawn(async move {
+            run_window(&deps, &cfg, &fresh_ladder(), window_ts).await
+        });
+
+        // Advance tokio's mocked clock past the 2s deadline.
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        let outcome = task.await.unwrap();
+
+        assert!(matches!(outcome,
+            WindowOutcome::Won { ref proceeds_usd } if *proceeds_usd == Decimal::from_str("5.50").unwrap()
+        ), "got {outcome:?}");
+
+        // Verify event sequence ended with SellFilled, never Resolved.
+        let kinds = emitter.kinds();
+        assert!(kinds.iter().any(|k| matches!(k, TraderEventKind::SellFilled { .. })),
+                "missing SellFilled event");
+        assert!(!kinds.iter().any(|k| matches!(k, TraderEventKind::Resolved { .. })),
+                "should NOT have Resolved event on early-exit path");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hold_early_exit_sells_at_deadline_with_loss() {
+        let window_ts = chrono::Utc::now().timestamp();
+        let market = open_market_at("0.50", "0.50");
+        let deps = WindowDeps {
+            market: StubMarket::ok(market),
+            executor: StubExec::buy_then_sell(
+                Ok(FillResult {
+                    fill_price: Decimal::from_str("0.50").unwrap(),
+                    shares: Decimal::from(10),
+                    dollars: Decimal::from(5),
+                }),
+                Ok(FillResult {
+                    fill_price: Decimal::from_str("0.40").unwrap(),
+                    shares: Decimal::from(10),
+                    dollars: Decimal::from_str("4.00").unwrap(),
+                }),
+            ),
+            resolver: StubResolver::timeout(),
+            emitter: CapturingEmitter::new(),
+            price: stub_price("0.40"),
+            events: stub_events(),
+        };
+
+        let cfg = cfg_with_early_exit(2);
+        let task = tokio::spawn(async move {
+            run_window(&deps, &cfg, &fresh_ladder(), window_ts).await
+        });
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        let outcome = task.await.unwrap();
+
+        match outcome {
+            WindowOutcome::Lost { spent_usd } => {
+                // 5.00 buy - 4.00 sell = 1.00 net loss
+                assert_eq!(spent_usd, Decimal::from(1), "got {spent_usd}");
+            }
+            _ => panic!("expected Lost, got {outcome:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hold_early_exit_sell_failure_emits_alert() {
+        let window_ts = chrono::Utc::now().timestamp();
+        let market = open_market_at("0.50", "0.50");
+        let emitter = CapturingEmitter::new();
+        let deps = WindowDeps {
+            market: StubMarket::ok(market),
+            executor: StubExec::buy_then_sell(
+                Ok(FillResult {
+                    fill_price: Decimal::from_str("0.50").unwrap(),
+                    shares: Decimal::from(10),
+                    dollars: Decimal::from(5),
+                }),
+                Err(ExecError::FillOrKillFailed),
+            ),
+            resolver: StubResolver::timeout(),
+            emitter: emitter.clone(),
+            price: stub_price("0.50"),
+            events: stub_events(),
+        };
+
+        let cfg = cfg_with_early_exit(2);
+        let task = tokio::spawn(async move {
+            run_window(&deps, &cfg, &fresh_ladder(), window_ts).await
+        });
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        let outcome = task.await.unwrap();
+
+        // Convention from v1.1 winner_sweep: failed sell returns
+        // Won { proceeds_usd: 0 } so the FSM doesn't escalate stake.
+        assert!(matches!(outcome,
+            WindowOutcome::Won { ref proceeds_usd } if *proceeds_usd == Decimal::ZERO
+        ), "got {outcome:?}");
+
+        let kinds = emitter.kinds();
+        assert!(kinds.iter().any(|k| matches!(k, TraderEventKind::SellRejected { .. })),
+                "missing SellRejected");
+        assert!(kinds.iter().any(|k| matches!(k, TraderEventKind::Alert { .. })),
+                "missing Alert");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hold_early_exit_does_not_invoke_resolver() {
+        // If resolver is called, StubResolver::timeout would make the test
+        // pass with Skipped { ResolutionTimeout } — that's a bug.
+        // We assert the outcome is Won (not Skipped) to detect any
+        // accidental fallthrough to await_resolution_and_sweep.
+        let window_ts = chrono::Utc::now().timestamp();
+        let market = open_market_at("0.50", "0.50");
+        let deps = WindowDeps {
+            market: StubMarket::ok(market),
+            executor: StubExec::buy_then_sell(
+                Ok(FillResult {
+                    fill_price: Decimal::from_str("0.50").unwrap(),
+                    shares: Decimal::from(10),
+                    dollars: Decimal::from(5),
+                }),
+                Ok(FillResult {
+                    fill_price: Decimal::from_str("0.50").unwrap(),
+                    shares: Decimal::from(10),
+                    dollars: Decimal::from(5),
+                }),
+            ),
+            resolver: StubResolver::timeout(),  // would cause Skipped if invoked
+            emitter: CapturingEmitter::new(),
+            price: stub_price("0.50"),
+            events: stub_events(),
+        };
+
+        let cfg = cfg_with_early_exit(2);
+        let task = tokio::spawn(async move {
+            run_window(&deps, &cfg, &fresh_ladder(), window_ts).await
+        });
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        let outcome = task.await.unwrap();
+
+        // Break-even: 5.00 buy at 0.50, 5.00 sell at 0.50 → Lost { 0 }.
+        match outcome {
+            WindowOutcome::Lost { spent_usd } => {
+                assert_eq!(spent_usd, Decimal::ZERO);
+            }
+            _ => panic!("expected Lost (break-even), got {outcome:?}"),
+        }
     }
 }
