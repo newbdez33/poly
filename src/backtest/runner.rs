@@ -48,6 +48,7 @@ pub fn run_strategy(
     let mut total_pnl = Decimal::ZERO;       // accumulated across cap resets
     let mut cap_resets = 0;
     let mut history = Vec::with_capacity(windows.len());
+    let mut prev_winner: Option<crate::trader::ladder::Direction> = None;
 
     for window in windows {
         if ladder.is_stopped() {
@@ -68,7 +69,18 @@ pub fn run_strategy(
         };
         let step_before = ladder.current_step;
 
-        let outcome = simulate_window(window, strategy, oracle, stake);
+        // v1.10: per-window direction selection.
+        // If follow_previous_winner, use last window's actual winner;
+        // otherwise stick with the strategy's fixed direction.
+        let effective_strategy = if strategy.follow_previous_winner {
+            let dir = prev_winner.unwrap_or(strategy.direction);
+            StrategyConfig { direction: dir, ..strategy.clone() }
+        } else {
+            strategy.clone()
+        };
+
+        let outcome = simulate_window(window, &effective_strategy, oracle, stake);
+        prev_winner = window.winner;
 
         // Apply outcome to ladder (Martingale FSM); for Fixed stake, ladder stays at step 1
         // since we override stake on next iter, but apply_outcome still tracks pnl.
@@ -128,6 +140,7 @@ mod tests {
             band_min: dec!(0.45), band_max: dec!(0.55),
             stake: StakeRule::Martingale { base: dec!(5), max_step: 5 },
             exit: ExitRule::HoldToResolution,
+            follow_previous_winner: false,
         }
     }
 

@@ -127,6 +127,7 @@ mod tests {
             band_max: dec!(0.55),
             stake: StakeRule::Fixed { stake: dec!(5) },
             exit: ExitRule::HoldToResolution,
+            follow_previous_winner: false,
         }
     }
 

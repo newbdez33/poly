@@ -86,6 +86,10 @@ pub struct StrategyConfig {
     pub band_max: Decimal,
     pub stake: StakeRule,
     pub exit: ExitRule,
+    /// v1.10: if true, runner overrides `direction` per window with the
+    /// previous window's actual winner (momentum strategy). First window
+    /// falls back to the fixed `direction` field.
+    pub follow_previous_winner: bool,
 }
 
 pub fn strategy_set() -> Vec<StrategyConfig> {
@@ -97,6 +101,11 @@ pub fn strategy_set() -> Vec<StrategyConfig> {
         band_max: dec!(0.55),
         stake,
         exit,
+        follow_previous_winner: false,
+    };
+    let follow_prev = |name: &str, exit: ExitRule, stake: StakeRule| StrategyConfig {
+        follow_previous_winner: true,
+        ..common(name, exit, stake)
     };
     vec![
         common("1_hold_martingale",       ExitRule::HoldToResolution,                              mart()),
@@ -114,6 +123,13 @@ pub fn strategy_set() -> Vec<StrategyConfig> {
             ExitRule::TpOnlyOrEarlyExit { tp_price: dec!(0.75), exit_at_secs: 270 },
             mart()),
         common("13_hold_early_exit_270",
+            ExitRule::FixedTime { seconds: 270 },
+            mart()),
+        // v1.10: follow-previous-winner variants
+        follow_prev("14_hold_followprev",
+            ExitRule::HoldToResolution,
+            mart()),
+        follow_prev("15_hold_early_exit_270_followprev",
             ExitRule::FixedTime { seconds: 270 },
             mart()),
     ]
@@ -154,7 +170,7 @@ mod tests {
         let mut names: Vec<&String> = s.iter().map(|c| &c.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 13);
+        assert_eq!(names.len(), 15);
     }
 
     #[test]
@@ -175,8 +191,8 @@ mod tests {
     #[test]
     fn filter_all_returns_everything() {
         let s = strategy_set();
-        assert_eq!(filter_strategies(&s, "all").len(), 13);
-        assert_eq!(filter_strategies(&s, "").len(), 13);
+        assert_eq!(filter_strategies(&s, "all").len(), 15);
+        assert_eq!(filter_strategies(&s, "").len(), 15);
     }
 
     #[test]
@@ -296,9 +312,9 @@ mod tests {
     }
 
     #[test]
-    fn strategy_set_has_thirteen_strategies() {
+    fn strategy_set_has_fifteen_strategies() {
         let s = strategy_set();
-        assert_eq!(s.len(), 13);
+        assert_eq!(s.len(), 15);
     }
 
     #[test]
