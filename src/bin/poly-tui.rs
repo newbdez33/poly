@@ -154,6 +154,7 @@ async fn main() -> anyhow::Result<()> {
                     return;
                 }
             };
+            tracing::info!("trader stream tail: {} history events loaded", tail.history.len());
             for ev in tail.history {
                 if event_tx_trader.send(AppEvent::TraderEvent(ev)).await.is_err() { return; }
             }

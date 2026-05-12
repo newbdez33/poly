@@ -184,6 +184,22 @@ async fn determine_outcome_pre_close(
     window_ts: i64,
     window_seconds: i64,
 ) -> WindowOutcome {
+    // Capture entry BTC price from Chainlink — this is our own reference.
+    // Polymarket also reads Chainlink BTC/USD on Polygon for resolution, so
+    // our entry reading should match Polymarket's `priceToBeat` (modulo
+    // Chainlink's update heartbeat, ~30s for BTC). Gamma's API doesn't
+    // expose priceToBeat for OPEN windows, so we can't read theirs directly.
+    let entry_btc = match deps.btc_price.latest_price().await {
+        Ok(p) => p,
+        Err(e) => {
+            emit_kind(deps, ladder, TraderEventKind::Alert {
+                message: format!("chainlink entry fetch failed ({e}); falling back to gamma resolver"),
+            }).await;
+            let r = deps.resolver.await_resolution(market).await;
+            return winner_sweep_no_sell(deps, ladder, buy_fill, r).await;
+        }
+    };
+
     // Sleep until t=window_close - 4s.
     let determine_at = window_ts + window_seconds - OUTCOME_LEAD_SECS;
     let now = chrono::Utc::now().timestamp();
@@ -192,43 +208,24 @@ async fn determine_outcome_pre_close(
         tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
     }
 
-    // Determine winner from Chainlink BTC vs price_to_beat.
-    // Gamma populates `priceToBeat` async ~5-30s after window open. The
-    // WindowMarket captured at BUY time often has price_to_beat=None.
-    // Re-fetch here — by t=window_close-4s, gamma has definitely populated it.
-    let mins = (window_seconds / 60) as u32;
-    let fresh_market = match deps.market.find_window(window_ts, mins).await {
-        Ok(m) => m,
-        Err(_) => {
-            // Stale data is acceptable here — fall back to the original market.
-            market.clone()
-        }
-    };
-    let price_to_beat = match fresh_market.price_to_beat.or(market.price_to_beat) {
-        Some(p) => p,
-        None => {
-            // Still no reference price — fall back to gamma resolver.
-            emit_kind(deps, ladder, TraderEventKind::Alert {
-                message: "price_to_beat missing; falling back to gamma resolver".into(),
-            }).await;
-            let r = deps.resolver.await_resolution(market).await;
-            return winner_sweep_no_sell(deps, ladder, buy_fill, r).await;
-        }
-    };
-    let btc_price = match deps.btc_price.latest_price().await {
+    // Read close BTC and compare to entry. If close > entry → UP wins.
+    let close_btc = match deps.btc_price.latest_price().await {
         Ok(p) => p,
         Err(e) => {
-            // Chainlink down — fall back to gamma resolver. This may miss
-            // the next window boundary but we get the correct outcome.
             emit_kind(deps, ladder, TraderEventKind::Alert {
-                message: format!("chainlink fetch failed ({e}); falling back to gamma resolver"),
+                message: format!("chainlink close fetch failed ({e}); falling back to gamma resolver"),
             }).await;
             let r = deps.resolver.await_resolution(market).await;
             return winner_sweep_no_sell(deps, ladder, buy_fill, r).await;
         }
     };
 
-    let up_won = btc_price > price_to_beat;
+    let up_won = close_btc > entry_btc;
+    // Keep variable name for downstream symmetry with old code.
+    let _price_to_beat = entry_btc;
+    let btc_price = close_btc;
+    let _ = (_price_to_beat, btc_price);  // referenced only via up_won
+    let _ = market;  // no longer reading market.price_to_beat
     let our_won = match ladder.direction {
         Direction::Up => up_won,
         Direction::Down => !up_won,
@@ -613,14 +610,27 @@ mod tests {
     /// v1.9: Stub BTC price feed. Most window tests don't exercise the
     /// Chainlink outcome path, so a constant price is sufficient.
     struct StubBtcPrice {
-        result: Result<Decimal, ()>,
+        // Sequence of values returned by successive latest_price() calls.
+        // Last value repeats forever. Failing variant returns Err.
+        results: Mutex<Vec<Result<Decimal, ()>>>,
     }
     impl StubBtcPrice {
         fn at(price: &str) -> Arc<Self> {
-            Arc::new(Self { result: Ok(Decimal::from_str(price).unwrap()) })
+            Arc::new(Self {
+                results: Mutex::new(vec![Ok(Decimal::from_str(price).unwrap())]),
+            })
+        }
+        fn sequence(prices: &[&str]) -> Arc<Self> {
+            let v: Vec<Result<Decimal, ()>> = prices
+                .iter()
+                .map(|p| Ok(Decimal::from_str(p).unwrap()))
+                .collect();
+            Arc::new(Self { results: Mutex::new(v) })
         }
         fn failing() -> Arc<Self> {
-            Arc::new(Self { result: Err(()) })
+            Arc::new(Self {
+                results: Mutex::new(vec![Err(())]),
+            })
         }
     }
     #[async_trait]
@@ -628,7 +638,10 @@ mod tests {
         async fn latest_price(&self)
             -> Result<Decimal, crate::tui::market_watch::MarketWatchError>
         {
-            self.result.clone().map_err(|_| {
+            let mut q = self.results.lock().unwrap();
+            // Pop front; if list has >1 items. Otherwise replay last.
+            let v = if q.len() > 1 { q.remove(0) } else { q[0].clone() };
+            v.map_err(|_| {
                 crate::tui::market_watch::MarketWatchError::Rpc("stub error".into())
             })
         }
@@ -725,7 +738,7 @@ mod tests {
             emitter: CapturingEmitter::new(),
             price: stub_price("0.50"),
             events: stub_events(),
-            btc_price: StubBtcPrice::at("80100"),  // > price_to_beat → UP wins
+            btc_price: StubBtcPrice::sequence(&["80000", "80100"]),  // entry < close → UP wins
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         // proceeds_usd = shares × $1.00 = 10
@@ -749,7 +762,7 @@ mod tests {
             emitter: CapturingEmitter::new(),
             price: stub_price("0.50"),
             events: stub_events(),
-            btc_price: StubBtcPrice::at("79900"),  // < price_to_beat → UP loses
+            btc_price: StubBtcPrice::sequence(&["80000", "79900"]),  // entry > close → UP loses
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome,
@@ -827,6 +840,8 @@ mod tests {
 
     #[tokio::test]
     async fn skip_resolution_timeout() {
+        // v1.9: hold path uses Chainlink, not resolver. Skipped { ResolutionTimeout }
+        // only fires on the fallback path (Chainlink RPC failure → gamma resolver → timeout).
         let market = open_market_at("0.50", "0.50");
         let deps = WindowDeps {
             market: StubMarket::ok(market),
@@ -839,7 +854,7 @@ mod tests {
             emitter: CapturingEmitter::new(),
             price: stub_price("0.50"),
             events: stub_events(),
-            btc_price: StubBtcPrice::at("80000"),
+            btc_price: StubBtcPrice::failing(),  // forces fallback to resolver
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome,
@@ -893,7 +908,7 @@ mod tests {
             emitter: emitter.clone(),
             price: stub_price("0.50"),
             events: stub_events(),
-            btc_price: StubBtcPrice::at("80100"),  // UP wins
+            btc_price: StubBtcPrice::sequence(&["80000", "80100"]),  // UP wins
         };
         run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         let kinds = emitter.kinds();
