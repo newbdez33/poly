@@ -401,7 +401,7 @@ fn build_status_line<'a>(state: &'a UiState) -> Line<'a> {
     spans.push(Span::raw(" "));
     spans.extend(led_span("Trader", trader_health_to_led(state.trader_health)));
     spans.push(Span::raw(" "));
-    spans.extend(led_span("BTC", btc_feed_led(state)));
+    spans.extend(led_span("Chainlink", btc_feed_led(state)));
     spans.push(Span::raw(" "));
     spans.push(Span::raw(format!("refresh: {}s", state.refresh_interval.as_secs())));
     spans.push(Span::raw("  "));
