@@ -149,7 +149,49 @@ Spec / plan: `docs/superpowers/plans/2026-05-11-trader-hold-early-exit.md`.
 
 ---
 
-## v1.9 — Strategies 8/9 (TP+SL) revisited ⏳ TODO (unblocked)
+## v1.9 — `--exit-rule hold` (chainlink pre-close + Auto-Redeem) ✅ COMPLETE (commit 209e859)
+
+**Background.** v1.8 hold-early-exit had 25% FAK SELL failures on real-money. Each failure required manual or auto-redeem cleanup. Auto-Redeem enabled (2026-05-12) made winning stuck shares auto-pay to USDC. With that, the *act* of trying to SELL at t=270 stopped being necessary — we could just hold and let resolution + Auto-Redeem deliver the cash.
+
+**Pivot.** Rewrote `--exit-rule hold` semantics:
+1. BUY taker at window open
+2. Sleep until t=window_close − 4s (296s for 5min window)
+3. Query Chainlink BTC/USD on Polygon, compare to `price_to_beat`
+4. Emit `Won { proceeds_usd: shares × $1, cost_usd: buy.dollars }` or `Lost { spent_usd: buy.dollars }`
+5. **No SELL** — Polymarket Auto-Redeem credits winning shares to USDC at gamma resolution
+
+**Why t=296s (4s buffer):**
+- Scheduler needs ~2-3s to wake + advance to next 5min boundary
+- Chainlink RPC call ~500ms
+- 4s buffer ensures next window's t=300s BUY is not missed
+- BTC moves <$5 in 4s under normal conditions; rare misclassifications self-correct on next window
+
+**Share-based Martingale (v1.8.2 shipped in same commit):**
+- `LadderState.base_shares: u32` (was `base_usd: Decimal`)
+- Doubling sequence: 5/10/20/40/80/160/320/640 shares
+- Aligns with Polymarket's 5-share CLOB minimum
+- `WindowOutcome::Won` gains explicit `cost_usd` field
+
+**Fallbacks:**
+- Chainlink RPC down → fall back to gamma resolver (may miss next window's t=0 BUY)
+- `price_to_beat` missing → same gamma fallback
+- BTC price tie with `price_to_beat` (extremely rare) → resolver determines
+
+**Files changed (commit 209e859):**
+- `src/trader/ladder.rs` — share-based state + new Won variant
+- `src/trader/window.rs` — `determine_outcome_pre_close` replaces sell-based hold path
+- `src/bin/poly-trader.rs` — wires `HttpChainlinkFeed` into `WindowDeps`
+- `src/backtest/exit_rule.rs`, `src/backtest/runner.rs` — `Won` field updates
+- All ladder/window test fixtures updated
+
+**Expected behavior on dry-run (next):**
+- Each window: BUY at t=0 → sleep → Resolved event at t=296s → no Sell events
+- Lost windows escalate ladder (step 1 → step 2 → ...) cleanly
+- Cumulative PnL approximates strategy 1's backtest projection (+$0.16/window from `report-real-30d.html`)
+
+---
+
+## v1.10 — Strategies 8/9 (TP+SL) revisited ⏳ TODO (unblocked)
 
 v1.7.5 backtest showed `8_tp85_sl35` (+$1,696) and `9_tp85_sl30` (+$1,824) outperform strategy 13 (+$1,505) on real data. Originally blocked by redeem path requirement; **Auto-Redeem (2026-05-12) removes the blocker** — winning resolutions auto-pay to USDC without operator action.
 

@@ -142,8 +142,9 @@ See `TODO.md`. Highlights:
 - **v1.7.2** ✅ — Backtest oracle noise + SL parameter sweep
 - **v1.7.5** ✅ — Real Polymarket trade-history backtest (`--oracle real`, strategies 12/13)
 - **v1.8** ✅ — `--exit-rule hold-early-exit` trader (BUY → wait → market-sell at t=exit-at-secs); pairs with Polymarket Auto-Redeem for stuck-winner recovery
+- **v1.9** ✅ — `--exit-rule hold` rewritten: chainlink pre-close outcome at t=window_close−4s + Auto-Redeem (no SELL); share-based Martingale ladder (`base_shares: u32`)
 - **v1.3** — daemon / TUI split. Required before any new trading logic (multi-strategy, dynamic config, etc.)
-- **v1.9+** — MATIC + redeem integration; revisit strategies 8/9 (top backtest performers)
+- **v1.10+** — strategies 8/9 (TP+SL, top backtest performers); unblocked now that Auto-Redeem is on
 
 ## Documentation
 
@@ -262,12 +263,46 @@ BUY taker at entry, hold the position, then market-sell at `t = exit-at-secs` (m
 
 **Without Auto-Redeem:** stuck winning shares require `poly-redeem` + MATIC for gas. Auto-Redeem is strictly recommended for live use.
 
-**Alternative — strategies 8/9:** TP=0.85 / SL=0.30-0.35 score higher in backtest (+$1,696 to +$1,824) but require a different exit-rule (v1.9, planned).
+**Alternative — strategies 8/9:** TP=0.85 / SL=0.30-0.35 score higher in backtest (+$1,696 to +$1,824) but require a different exit-rule (v1.10, planned).
 
 | Flag | Valid with | Notes |
 |---|---|---|
 | `--exit-rule hold-early-exit` | (new) | Requires `--exit-at-secs`. Rejects `--maker`. |
 | `--exit-at-secs <u32>` | only with `hold-early-exit` | Range: 1..=(window_seconds - 30). No default — must specify explicitly. |
+
+### v1.9 — `hold` rewritten (chainlink pre-close + Auto-Redeem)
+
+```bash
+poly-trader --direction up \
+  --exit-rule hold \
+  --base 5 --max-step 8
+```
+
+Replaces the v1.1 "hold + market-sell winner" flow with a Chainlink-driven outcome decision:
+
+1. BUY taker at window open
+2. Sleep until **t = window_close − 4s** (e.g., t=296 for 5-min windows)
+3. Query Chainlink BTC/USD on Polygon, compare to `price_to_beat`
+4. Emit `Won` / `Lost` to the FSM (Martingale escalates on Lost as usual)
+5. **No SELL** — Polymarket Auto-Redeem credits winning shares to USDC at gamma resolution (~3-10s later)
+
+**Requires Auto-Redeem enabled** on the proxy wallet (one-time on-chain signature via portfolio UI). Without it, winning resolutions still pay, but you'd need `poly-redeem` + MATIC to claim them.
+
+**Why pre-close instead of post-resolution:**
+- Returns 4s before window close → scheduler catches next window's t=0 boundary
+- Strict Martingale: each outcome resolves before next entry (no lag from gamma's UMA delay)
+- Risk: BTC moves >$price_to_beat threshold in the final 4s ⇒ misclassification (~1% borderline windows). Auto-Redeem still pays correct cash; only the ladder's instantaneous accounting may briefly disagree.
+
+**v1.8.2 share-based Martingale** (shipped same commit):
+- `--base <N>` is interpreted as **shares** (was USD); defaults align with Polymarket's 5-share CLOB minimum
+- Doubling sequence: 5/10/20/40/80/160/320/640 shares
+- USD cost per step depends on entry ask (e.g., 5 sh × $0.50 ask = $2.50 step-1 cost)
+
+**Fallbacks:**
+- Chainlink RPC failure → falls back to gamma resolver (may miss next window's t=0 BUY)
+- `price_to_beat` missing → same fallback
+
+Spec / commit: `209e859`.
 
 ### Window length (v1.7.1, 5/15/60 min)
 
