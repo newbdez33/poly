@@ -18,6 +18,10 @@ pub struct StrategyStats {
     pub cap_resets: u32,
     pub max_consecutive_losses: u32,
     pub max_step_reached: u8,
+    /// Counts of completed loss streaks by length, index 0 unused.
+    /// e.g. loss_streak_histogram[6] = count of times a 6-loss streak ended.
+    /// A 12-loss streak counts only at index 12 (single event).
+    pub loss_streak_histogram: Vec<u32>,
     pub max_drawdown_usd: Decimal,
     pub max_drawdown_window_ts: i64,
     pub equity_curve: Vec<EquityPoint>,
@@ -38,6 +42,7 @@ pub fn compute_stats(run: &StrategyRunResult) -> StrategyStats {
     let mut max_step = 1u8;
     let mut consec_losses = 0u32;
     let mut max_consec_losses = 0u32;
+    let mut loss_streak_histogram = vec![0u32; 64];
     let mut equity_curve = Vec::with_capacity(run.windows.len());
     let mut round_pnls = Vec::with_capacity(run.windows.len());
     let mut peak_pnl = Decimal::ZERO;
@@ -49,7 +54,14 @@ pub fn compute_stats(run: &StrategyRunResult) -> StrategyStats {
         let round_pnl = w.ladder_pnl_after - prev_pnl;
         round_pnls.push(round_pnl.to_f64().unwrap_or(0.0));
         match &w.outcome {
-            WindowOutcome::Won { .. } => { wins += 1; consec_losses = 0; }
+            WindowOutcome::Won { .. } => {
+                wins += 1;
+                if consec_losses > 0 {
+                    let idx = (consec_losses as usize).min(loss_streak_histogram.len() - 1);
+                    loss_streak_histogram[idx] += 1;
+                }
+                consec_losses = 0;
+            }
             WindowOutcome::Lost { .. } => {
                 losses += 1;
                 consec_losses += 1;
@@ -76,6 +88,12 @@ pub fn compute_stats(run: &StrategyRunResult) -> StrategyStats {
         prev_pnl = w.ladder_pnl_after;
     }
 
+    // Final hanging loss streak (no win to terminate it).
+    if consec_losses > 0 {
+        let idx = (consec_losses as usize).min(loss_streak_histogram.len() - 1);
+        loss_streak_histogram[idx] += 1;
+    }
+
     let active = wins + losses;
     let win_rate = if active > 0 { wins as f64 / active as f64 } else { 0.0 };
     let total_pnl = run.final_pnl;
@@ -99,6 +117,7 @@ pub fn compute_stats(run: &StrategyRunResult) -> StrategyStats {
         cap_resets: run.cap_resets,
         max_consecutive_losses: max_consec_losses,
         max_step_reached: max_step,
+        loss_streak_histogram,
         max_drawdown_usd: max_drawdown,
         max_drawdown_window_ts: max_drawdown_ts,
         equity_curve,

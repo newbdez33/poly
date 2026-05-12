@@ -42,6 +42,7 @@ struct EquityChartDataset {
 
 pub fn render_html(stats: &[StrategyStats], meta: &ReportMeta) -> String {
     let summary = render_summary_table(stats);
+    let streak_table = render_streak_histogram_table(stats);
     let equity = render_equity_chart_json(stats);
     let histogram_data = render_histogram_data_json(stats);
     let cap_chart = render_cap_trigger_chart_json(stats);
@@ -66,6 +67,10 @@ pub fn render_html(stats: &[StrategyStats], meta: &ReportMeta) -> String {
 
 <h2>Summary</h2>
 {summary}
+
+<h2>Consecutive-loss streak distribution</h2>
+<p class="caption">How often each strategy hit N losses in a row. With max_step=5, any streak ≥5 counts as a cap-reset event.</p>
+{streak_table}
 
 <h2>Equity curves (cumulative PnL over time)</h2>
 <div class="chart-card">
@@ -188,6 +193,52 @@ fn render_head_meta(meta: &ReportMeta, total_windows: usize) -> String {
         sigma = meta.sigma,
         friction = meta.friction * 100.0,
         gen = meta.generated_at.format("%Y-%m-%d %H:%M UTC"),
+    )
+}
+
+/// Table: rows = strategies, columns = streak lengths 1..=10, cell = count.
+/// Streaks ≥5 (cap-reset territory) are highlighted with `cap-streak` class.
+fn render_streak_histogram_table(stats: &[StrategyStats]) -> String {
+    let mut rows = String::new();
+    for s in stats {
+        let color = color_for(&s.name);
+        let mut cells = String::new();
+        for len in 1u32..=10 {
+            let count = s.loss_streak_histogram.get(len as usize).copied().unwrap_or(0);
+            let class = if len >= 5 { " class=\"right cap-streak\"" } else { " class=\"right\"" };
+            let display = if count == 0 { "·".to_string() } else { count.to_string() };
+            cells.push_str(&format!("<td{class}>{display}</td>"));
+        }
+        // Tail: streaks longer than 10
+        let tail: u32 = s.loss_streak_histogram.iter().skip(11).sum();
+        let tail_class = " class=\"right cap-streak\"";
+        let tail_display = if tail == 0 { "·".to_string() } else { tail.to_string() };
+        cells.push_str(&format!("<td{tail_class}>{tail_display}</td>"));
+        rows.push_str(&format!(
+            r#"<tr>
+<td><span class="strat-label"><span class="strat-dot" style="background:{color}"></span>{name}</span></td>
+{cells}
+<td class="right">{max_consec}</td>
+</tr>"#,
+            color = color,
+            name = s.name,
+            cells = cells,
+            max_consec = s.max_consecutive_losses,
+        ));
+    }
+    format!(
+        r#"<table>
+<thead><tr>
+<th>Strategy</th>
+<th class="right">1</th><th class="right">2</th><th class="right">3</th><th class="right">4</th>
+<th class="right cap-streak">5</th><th class="right cap-streak">6</th><th class="right cap-streak">7</th>
+<th class="right cap-streak">8</th><th class="right cap-streak">9</th><th class="right cap-streak">10</th>
+<th class="right cap-streak">11+</th>
+<th class="right">max</th>
+</tr></thead>
+<tbody>{rows}</tbody>
+</table>"#,
+        rows = rows,
     )
 }
 
@@ -383,6 +434,8 @@ td.right{text-align:right;font-variant-numeric:tabular-nums}
 .pos{color:var(--positive);font-weight:600}
 .neg{color:var(--negative);font-weight:600}
 .dim{color:var(--text-dim)}
+.cap-streak{background:rgba(217,73,73,0.10)}
+.caption{color:var(--text-dim);font-size:0.9em;margin:-0.5em 0 0.8em 0}
 .chart-card{background:var(--bg-elev);border:1px solid var(--border);border-radius:6px;padding:16px;margin-bottom:16px}
 .chart-container{position:relative;height:360px}
 .histogram-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
@@ -419,6 +472,7 @@ mod tests {
             cap_resets: 1,
             max_consecutive_losses: 5,
             max_step_reached: 5,
+            loss_streak_histogram: vec![0; 64],
             max_drawdown_usd: dec!(155),
             max_drawdown_window_ts: 1000,
             equity_curve: vec![

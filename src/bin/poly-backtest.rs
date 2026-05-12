@@ -142,8 +142,9 @@ async fn main() -> Result<()> {
         println!("[poly-backtest]   running {}...", strategy.name);
         let result = run_strategy(strategy, &loaded.windows, oracle.as_ref());
         let stats = compute_stats(&result);
-        println!("[poly-backtest]     PnL=${:.2}  win_rate={:.1}%  cap_resets={}",
-            stats.total_pnl_usd, stats.win_rate * 100.0, stats.cap_resets);
+        println!("[poly-backtest]     PnL=${:.2}  win_rate={:.1}%  cap_resets={}  max_step={}  max_consec_losses={}",
+            stats.total_pnl_usd, stats.win_rate * 100.0, stats.cap_resets,
+            stats.max_step_reached, stats.max_consecutive_losses);
         all_stats.push(stats);
     }
 
