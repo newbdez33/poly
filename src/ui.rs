@@ -271,6 +271,17 @@ fn trader_health_to_led(h: TraderHealth) -> HealthLed {
     }
 }
 
+/// BTC price feed health: Green if a Chainlink RPC reading arrived within
+/// the last 30s, Yellow within 90s, Red otherwise.
+fn btc_feed_led(state: &UiState) -> HealthLed {
+    let Some(m) = &state.market else { return HealthLed::Red; };
+    let Some(at) = m.last_rpc_ok_at else { return HealthLed::Red; };
+    let age = state.now.signed_duration_since(at).num_seconds().max(0);
+    if age < 30 { HealthLed::Green }
+    else if age < 90 { HealthLed::Yellow }
+    else { HealthLed::Red }
+}
+
 fn render_market_strip(frame: &mut Frame, area: Rect, state: &UiState) {
     use rust_decimal::prelude::ToPrimitive;
 
@@ -389,6 +400,8 @@ fn build_status_line<'a>(state: &'a UiState) -> Line<'a> {
     spans.extend(led_span("Redis", state.redis_health));
     spans.push(Span::raw(" "));
     spans.extend(led_span("Trader", trader_health_to_led(state.trader_health)));
+    spans.push(Span::raw(" "));
+    spans.extend(led_span("BTC", btc_feed_led(state)));
     spans.push(Span::raw(" "));
     spans.push(Span::raw(format!("refresh: {}s", state.refresh_interval.as_secs())));
     spans.push(Span::raw("  "));

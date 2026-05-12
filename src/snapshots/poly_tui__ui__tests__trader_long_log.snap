@@ -13,4 +13,4 @@ expression: render_to_buffer(&state)
 22:15:20  SessionStarted                                    
 22:15:20  SessionStarted                                    
 22:15:20  SessionStarted                                    
-● CLOB  ● Redis  ● Trader  refresh: 30s  last: --    q quit
+● CLOB  ● Redis  ● Trader  ● BTC  refresh: 30s  last: --
