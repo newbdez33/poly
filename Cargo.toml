@@ -36,6 +36,7 @@ envy = "0.4"
 
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 clap = { version = "4", features = ["derive"] }
 

@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-const WS_URL: &str = "wss://ws-live-data.polymarket.com";
+const WS_URL: &str = "wss://ws-live-data.polymarket.com/";
 const PING_INTERVAL: Duration = Duration::from_secs(5);
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 /// Reject `latest_price()` if the cached value is older than this. WebSocket
@@ -62,35 +62,50 @@ pub struct PolymarketBtcWsFeed {
 }
 
 impl PolymarketBtcWsFeed {
-    /// Connect and start the background WebSocket task. Returns immediately;
-    /// the first price arrives within ~1-2s after connect.
+    /// Connect synchronously (verifies the URL + handshake), then spawn the
+    /// read loop. Returns Err if the initial connect fails.
     pub async fn connect() -> Result<Self, MarketWatchError> {
+        // Rustls 0.23+ requires an explicit crypto provider. Install once;
+        // ignore the Err if another caller (e.g., reqwest) already installed it.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        tracing::info!("polymarket-ws initial connect to {WS_URL}");
+        let (ws, _resp) = connect_async(WS_URL).await
+            .map_err(|e| MarketWatchError::Connect(format!("ws connect: {e}")))?;
+        tracing::info!("polymarket-ws connected");
         let latest = Arc::new(Mutex::new(None));
         let latest_for_task = latest.clone();
         tokio::spawn(async move {
+            // First session uses the already-connected ws.
+            if let Err(e) = run_session_with(ws, &latest_for_task).await {
+                tracing::warn!("polymarket-ws first session ended: {e}");
+            }
             run_ws_loop(latest_for_task).await;
         });
         Ok(Self { latest })
     }
 }
 
-/// Top-level WebSocket loop: connect, subscribe, recv + ping, reconnect on error.
+/// Reconnect loop after initial session ends.
 async fn run_ws_loop(latest: Arc<Mutex<Option<LatestPrice>>>) {
     loop {
-        if let Err(e) = run_ws_session(&latest).await {
-            tracing::warn!("polymarket-ws session ended: {e}; reconnecting in {}s",
-                RECONNECT_DELAY.as_secs());
-        } else {
-            tracing::warn!("polymarket-ws session ended cleanly; reconnecting");
-        }
         tokio::time::sleep(RECONNECT_DELAY).await;
+        tracing::info!("polymarket-ws reconnecting to {WS_URL}");
+        match connect_async(WS_URL).await {
+            Ok((ws, _)) => {
+                tracing::info!("polymarket-ws reconnected");
+                if let Err(e) = run_session_with(ws, &latest).await {
+                    tracing::warn!("polymarket-ws session ended: {e}");
+                }
+            }
+            Err(e) => tracing::warn!("polymarket-ws reconnect failed: {e}"),
+        }
     }
 }
 
-async fn run_ws_session(latest: &Arc<Mutex<Option<LatestPrice>>>) -> Result<(), String> {
-    let (ws, _resp) = connect_async(WS_URL).await
-        .map_err(|e| format!("connect_async failed: {e}"))?;
-    tracing::info!("polymarket-ws connected: {WS_URL}");
+async fn run_session_with(
+    ws: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    latest: &Arc<Mutex<Option<LatestPrice>>>,
+) -> Result<(), String> {
     let (mut write, mut read) = ws.split();
 
     // Subscribe to BTC/USD via Chainlink topic.
@@ -126,22 +141,31 @@ async fn run_ws_session(latest: &Arc<Mutex<Option<LatestPrice>>>) -> Result<(), 
                 match msg {
                     Message::Text(text) => {
                         if text.eq_ignore_ascii_case("PONG") { continue; }
-                        if let Ok(upd) = serde_json::from_str::<UpdateMessage>(&text) {
-                            if upd.topic == "crypto_prices_chainlink"
-                                && upd.msg_type == "update"
-                                && upd.payload.symbol == "btc/usd"
-                            {
-                                let price = Decimal::from_str(&upd.payload.value.to_string())
-                                    .ok();
-                                if let Some(p) = price {
-                                    *latest.lock().unwrap() = Some(LatestPrice {
-                                        value: p,
-                                        received_at: Instant::now(),
-                                    });
+                        match serde_json::from_str::<UpdateMessage>(&text) {
+                            Ok(upd) => {
+                                if upd.topic == "crypto_prices_chainlink"
+                                    && upd.msg_type == "update"
+                                    && upd.payload.symbol == "btc/usd"
+                                {
+                                    let price = Decimal::from_str(&upd.payload.value.to_string())
+                                        .ok();
+                                    if let Some(p) = price {
+                                        let was_empty = latest.lock().unwrap().is_none();
+                                        *latest.lock().unwrap() = Some(LatestPrice {
+                                            value: p,
+                                            received_at: Instant::now(),
+                                        });
+                                        if was_empty {
+                                            tracing::info!("polymarket-ws first BTC price: ${p}");
+                                        }
+                                    }
                                 }
                             }
+                            Err(e) => {
+                                // Bulk snapshot or other format — log first 200 chars at debug.
+                                tracing::debug!("ws msg parse err ({e}): {}", &text.chars().take(200).collect::<String>());
+                            }
                         }
-                        // ignore subscription-ack and other messages
                     }
                     Message::Ping(p) => {
                         let _ = write.send(Message::Pong(p)).await;
