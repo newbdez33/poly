@@ -3,6 +3,7 @@ use clap::Parser;
 use poly_tui::config::Config;
 use poly_tui::trader::adapters::{
     chainlink_btc_wrapper::HttpChainlinkFeed,
+    polymarket_btc_ws_wrapper::PolymarketBtcWsFeed,
     clob_executor_wrapper::ClobOrderExecutor,
     gamma_price_wrapper::GammaPriceFetcher,
     gamma_wrapper::GammaMarketDiscovery,
@@ -137,11 +138,23 @@ async fn main() -> Result<()> {
         GammaPriceFetcher::new(gamma_host.clone()),
     );
 
-    // v1.9: Chainlink BTC/USD oracle for pre-close outcome determination.
+    // v1.9.1: Polymarket Real-Time Data WebSocket (crypto_prices_chainlink).
+    // Same source Polymarket uses to resolve 5min BTC up/down markets — sub-
+    // second updates vs the 60s heartbeat of on-chain Chainlink aggregator.
+    let _ = HttpChainlinkFeed::connect; // keep import referenced for tests
     let btc_price: Arc<dyn BtcPriceFeed> = Arc::new(
-        HttpChainlinkFeed::connect(&cfg.polygon_rpc_url).await
-            .context("connecting Chainlink BTC feed")?,
+        PolymarketBtcWsFeed::connect().await
+            .context("connecting Polymarket BTC WebSocket feed")?,
     );
+    // Give the WebSocket a moment to receive the first price before windows start.
+    tracing::info!("waiting for initial BTC price from Polymarket WebSocket...");
+    for _ in 0..10 {
+        if btc_price.latest_price().await.is_ok() {
+            tracing::info!("initial BTC price received");
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
 
     // WindowExecutor adapter (binds run_window over our deps)
     let window_deps = Arc::new(WindowDeps {
