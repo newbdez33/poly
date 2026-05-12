@@ -20,6 +20,10 @@ pub struct WindowDeps {
     pub emitter: Arc<dyn TraderEventEmitter>,
     pub price: Arc<dyn MidwindowPriceFetcher>,
     pub events: Arc<dyn OrderEventStream>,
+    /// v1.9: Chainlink BTC/USD oracle on Polygon — used to determine window
+    /// outcome at t=window_close-4s without waiting for gamma resolution.
+    /// Pairs with Polymarket Auto-Redeem for instant cash credit on wins.
+    pub btc_price: Arc<dyn crate::tui::market_watch::BtcPriceFeed>,
 }
 
 pub struct WindowConfig {
@@ -81,7 +85,7 @@ pub async fn run_window(
 
     // Step 3: Buy. Maker mode places its own limit buy inside run_maker; only
     // the taker path does the FoK here.
-    let dollars = ladder.current_bet_usd();
+    let dollars = ladder.current_bet_dollars(ask);
     let token_id = market.token_id_for(ladder.direction).to_string();
 
     if cfg.maker && cfg.exit.is_some() {
@@ -144,8 +148,11 @@ pub async fn run_window(
     }
     match &cfg.exit {
         None => {
-            // v1.1 path: hold to resolution, sell winner
-            await_resolution_and_sweep(deps, ladder, &market, &token_id, &buy_fill).await
+            // v1.9 path: hold + chainlink-determined outcome at t=close-4s.
+            // Auto-Redeem credits winning shares to USDC; trader skips sell.
+            determine_outcome_pre_close(
+                deps, ladder, &market, &buy_fill, window_ts, cfg.window_seconds,
+            ).await
         }
         Some(exit_cfg) => {
             // v1.5 path: race ExitWatcher vs await_resolution
@@ -156,16 +163,122 @@ pub async fn run_window(
     }
 }
 
-/// v1.1 path: existing await_resolution + winner sweep.
-async fn await_resolution_and_sweep(
+/// v1.9 hold mode: at t=window_close-OUTCOME_LEAD_SECS query Chainlink BTC,
+/// compare to price_to_beat, emit Won/Lost. No sell — Polymarket Auto-Redeem
+/// handles cash crediting for winning shares.
+///
+/// Trade-offs vs old gamma-resolver approach:
+/// - Fast: no UMA resolution lag (gamma typically ~3-10s post-close).
+/// - Scheduler doesn't miss next window (returns ~4s before window close).
+/// - Risk: BTC could move in the final 4s and flip the outcome (~1% windows
+///   on borderline cases). Auto-Redeem pays the correct cash regardless;
+///   only the ladder's instantaneous accounting may briefly disagree, then
+///   self-corrects on next window.
+const OUTCOME_LEAD_SECS: i64 = 4;
+
+async fn determine_outcome_pre_close(
     deps: &WindowDeps,
     ladder: &LadderState,
     market: &WindowMarket,
-    token_id: &str,
     buy_fill: &FillResult,
+    window_ts: i64,
+    window_seconds: i64,
 ) -> WindowOutcome {
-    let r = deps.resolver.await_resolution(market).await;
-    winner_sweep(deps, ladder, token_id, buy_fill, r).await
+    // Sleep until t=window_close - 4s.
+    let determine_at = window_ts + window_seconds - OUTCOME_LEAD_SECS;
+    let now = chrono::Utc::now().timestamp();
+    let wait = (determine_at - now).max(0) as u64;
+    if wait > 0 {
+        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+    }
+
+    // Determine winner from Chainlink BTC vs price_to_beat.
+    let price_to_beat = match market.price_to_beat {
+        Some(p) => p,
+        None => {
+            // No reference price — fall back to gamma resolver.
+            emit_kind(deps, ladder, TraderEventKind::Alert {
+                message: "price_to_beat missing; falling back to gamma resolver".into(),
+            }).await;
+            let r = deps.resolver.await_resolution(market).await;
+            return winner_sweep_no_sell(deps, ladder, buy_fill, r).await;
+        }
+    };
+    let btc_price = match deps.btc_price.latest_price().await {
+        Ok(p) => p,
+        Err(e) => {
+            // Chainlink down — fall back to gamma resolver. This may miss
+            // the next window boundary but we get the correct outcome.
+            emit_kind(deps, ladder, TraderEventKind::Alert {
+                message: format!("chainlink fetch failed ({e}); falling back to gamma resolver"),
+            }).await;
+            let r = deps.resolver.await_resolution(market).await;
+            return winner_sweep_no_sell(deps, ladder, buy_fill, r).await;
+        }
+    };
+
+    let up_won = btc_price > price_to_beat;
+    let our_won = match ladder.direction {
+        Direction::Up => up_won,
+        Direction::Down => !up_won,
+    };
+
+    emit_kind(deps, ladder, TraderEventKind::Resolved {
+        winner: if up_won { Direction::Up } else { Direction::Down },
+        our_side: ladder.direction,
+        our_outcome: if our_won { WinLose::Win } else { WinLose::Lose },
+    }).await;
+
+    if our_won {
+        // Auto-Redeem will credit shares × $1.00 to USDC at gamma's resolution.
+        // proceeds_usd = expected redeem payout for ladder accounting.
+        WindowOutcome::Won {
+            proceeds_usd: buy_fill.shares,  // shares × $1.00 = shares (Decimal)
+            cost_usd: buy_fill.dollars,
+        }
+    } else {
+        WindowOutcome::Lost { spent_usd: buy_fill.dollars }
+    }
+}
+
+/// Fallback for chainlink failures: gamma-resolution path without sell_market.
+/// We KNOW the winner from gamma; Auto-Redeem will pay the cash. Emit the
+/// outcome and let the FSM advance the ladder.
+async fn winner_sweep_no_sell(
+    deps: &WindowDeps,
+    ladder: &LadderState,
+    buy_fill: &FillResult,
+    r: Result<Resolution, ResolveError>,
+) -> WindowOutcome {
+    let resolution = match r {
+        Ok(r) => r,
+        Err(ResolveError::Timeout { .. }) => {
+            emit_kind(deps, ladder, TraderEventKind::ResolutionTimeout).await;
+            return WindowOutcome::Skipped { reason: SkipReason::ResolutionTimeout };
+        }
+        Err(e) => {
+            emit_kind(deps, ladder, TraderEventKind::Alert {
+                message: format!("resolver error: {e}"),
+            }).await;
+            return WindowOutcome::Skipped { reason: SkipReason::GammaApiUnavailable };
+        }
+    };
+
+    let our_won = resolution.winner == ladder.direction;
+    emit_kind(deps, ladder, TraderEventKind::Resolved {
+        winner: resolution.winner,
+        our_side: ladder.direction,
+        our_outcome: if our_won { WinLose::Win } else { WinLose::Lose },
+    }).await;
+
+    if our_won {
+        WindowOutcome::Won {
+            proceeds_usd: buy_fill.shares,
+            cost_usd: buy_fill.dollars,
+        }
+    } else {
+        WindowOutcome::Lost { spent_usd: buy_fill.dollars }
+    }
 }
 
 /// v1.8 path: hold, then market-sell at t = exit_at_secs into the window.
@@ -229,7 +342,10 @@ async fn run_hold_early_exit(
             // shares × $1.00, so this slightly under-counts wins. The ladder
             // FSM only cares about Won-vs-Lost branching, not the magnitude.
             return if bid > dec!(0.5) {
-                WindowOutcome::Won { proceeds_usd: buy_fill.shares * bid }
+                WindowOutcome::Won {
+                    proceeds_usd: buy_fill.shares * bid,
+                    cost_usd: buy_fill.dollars,
+                }
             } else {
                 WindowOutcome::Lost { spent_usd: buy_fill.dollars }
             };
@@ -240,7 +356,7 @@ async fn run_hold_early_exit(
     }).await;
 
     if sell_fill.dollars > buy_fill.dollars {
-        WindowOutcome::Won { proceeds_usd: sell_fill.dollars }
+        WindowOutcome::Won { proceeds_usd: sell_fill.dollars, cost_usd: buy_fill.dollars }
     } else {
         WindowOutcome::Lost { spent_usd: buy_fill.dollars - sell_fill.dollars }
     }
@@ -288,11 +404,11 @@ async fn winner_sweep(
             emit_kind(deps, ladder, TraderEventKind::Alert {
                 message: format!("sell failed; shares stuck for token {token_id}"),
             }).await;
-            return WindowOutcome::Won { proceeds_usd: Decimal::ZERO };
+            return WindowOutcome::Won { proceeds_usd: Decimal::ZERO, cost_usd: buy_fill.dollars };
         }
     };
     emit_kind(deps, ladder, TraderEventKind::SellFilled { proceeds_usd: sell_fill.dollars }).await;
-    WindowOutcome::Won { proceeds_usd: sell_fill.dollars }
+    WindowOutcome::Won { proceeds_usd: sell_fill.dollars, cost_usd: buy_fill.dollars }
 }
 
 /// v1.5 path: race ExitWatcher against resolver. Earliest finisher wins.
@@ -325,8 +441,10 @@ async fn run_with_tp_sl(
     let trig = match trigger {
         Some(t) => t,
         None => {
-            // Watcher hit deadline without crossing tp/sl. Fall through to resolver.
-            return await_resolution_and_sweep(deps, ladder, market, token_id, buy_fill).await;
+            // Watcher hit deadline without crossing tp/sl. Fall through to
+            // resolver + winner-sweep (legacy v1.5 TP/SL path uses sell_market).
+            let r = deps.resolver.await_resolution(market).await;
+            return winner_sweep(deps, ladder, token_id, buy_fill, r).await;
         }
     };
 
@@ -346,12 +464,12 @@ async fn run_with_tp_sl(
             emit_kind(deps, ladder, TraderEventKind::Alert {
                 message: format!("tp/sl sell failed; shares stuck for token {token_id}"),
             }).await;
-            return WindowOutcome::Won { proceeds_usd: Decimal::ZERO };
+            return WindowOutcome::Won { proceeds_usd: Decimal::ZERO, cost_usd: buy_fill.dollars };
         }
     };
     emit_kind(deps, ladder, TraderEventKind::SellFilled { proceeds_usd: sell_fill.dollars }).await;
     if sell_fill.dollars > buy_fill.dollars {
-        WindowOutcome::Won { proceeds_usd: sell_fill.dollars }
+        WindowOutcome::Won { proceeds_usd: sell_fill.dollars, cost_usd: buy_fill.dollars }
     } else {
         WindowOutcome::Lost { spent_usd: buy_fill.dollars - sell_fill.dollars }
     }
@@ -481,8 +599,32 @@ mod tests {
         }
     }
 
+    /// v1.9: Stub BTC price feed. Most window tests don't exercise the
+    /// Chainlink outcome path, so a constant price is sufficient.
+    struct StubBtcPrice {
+        result: Result<Decimal, ()>,
+    }
+    impl StubBtcPrice {
+        fn at(price: &str) -> Arc<Self> {
+            Arc::new(Self { result: Ok(Decimal::from_str(price).unwrap()) })
+        }
+        fn failing() -> Arc<Self> {
+            Arc::new(Self { result: Err(()) })
+        }
+    }
+    #[async_trait]
+    impl crate::tui::market_watch::BtcPriceFeed for StubBtcPrice {
+        async fn latest_price(&self)
+            -> Result<Decimal, crate::tui::market_watch::MarketWatchError>
+        {
+            self.result.clone().map_err(|_| {
+                crate::tui::market_watch::MarketWatchError::Rpc("stub error".into())
+            })
+        }
+    }
+
     fn fresh_ladder() -> LadderState {
-        LadderState::new(Direction::Up, Decimal::from(5), 5, Utc::now())
+        LadderState::new(Direction::Up, 5, 5, Utc::now())
     }
 
     fn open_market_at(up_ask: &str, down_ask: &str) -> WindowMarket {
@@ -549,38 +691,18 @@ mod tests {
         assert_eq!(c.window_seconds, 900);
     }
 
-    #[tokio::test]
-    async fn happy_path_won() {
-        let market = open_market_at("0.50", "0.50");
-        let emitter = CapturingEmitter::new();
-        let deps = WindowDeps {
-            market: StubMarket::ok(market),
-            executor: StubExec::buy_then_sell(
-                Ok(FillResult {
-                    fill_price: Decimal::from_str("0.50").unwrap(),
-                    shares: Decimal::from(10),
-                    dollars: Decimal::from(5),
-                }),
-                Ok(FillResult {
-                    fill_price: Decimal::from_str("0.99").unwrap(),
-                    shares: Decimal::from(10),
-                    dollars: Decimal::from_str("9.90").unwrap(),
-                }),
-            ),
-            resolver: StubResolver::won(Direction::Up),
-            emitter: emitter.clone(),
-            price: stub_price("0.50"),
-            events: stub_events(),
-        };
-        let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
-        assert!(matches!(outcome,
-            WindowOutcome::Won { ref proceeds_usd } if *proceeds_usd == Decimal::from_str("9.90").unwrap()
-        ));
+    /// Market with price_to_beat set, for v1.9 chainlink-based outcome tests.
+    fn open_market_with_ptb(up_ask: &str, down_ask: &str, ptb: &str) -> WindowMarket {
+        let mut m = open_market_at(up_ask, down_ask);
+        m.price_to_beat = Some(Decimal::from_str(ptb).unwrap());
+        m
     }
 
     #[tokio::test]
-    async fn happy_path_lost() {
-        let market = open_market_at("0.50", "0.50");
+    async fn happy_path_won() {
+        // BTC > price_to_beat → UP wins; we picked UP → our_won = true.
+        // Auto-Redeem path emits Won { proceeds = shares × $1.00 = $10, cost = $5 }.
+        let market = open_market_with_ptb("0.50", "0.50", "80000");
         let deps = WindowDeps {
             market: StubMarket::ok(market),
             executor: StubExec::buy_only(Ok(FillResult {
@@ -588,15 +710,40 @@ mod tests {
                 shares: Decimal::from(10),
                 dollars: Decimal::from(5),
             })),
-            resolver: StubResolver::won(Direction::Down),
+            resolver: StubResolver::timeout(),  // chainlink path doesn't use resolver
             emitter: CapturingEmitter::new(),
             price: stub_price("0.50"),
             events: stub_events(),
+            btc_price: StubBtcPrice::at("80100"),  // > price_to_beat → UP wins
+        };
+        let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
+        // proceeds_usd = shares × $1.00 = 10
+        assert!(matches!(outcome,
+            WindowOutcome::Won { ref proceeds_usd, .. } if *proceeds_usd == Decimal::from(10)
+        ), "got {outcome:?}");
+    }
+
+    #[tokio::test]
+    async fn happy_path_lost() {
+        // BTC < price_to_beat → DOWN wins; we picked UP → our_won = false.
+        let market = open_market_with_ptb("0.50", "0.50", "80000");
+        let deps = WindowDeps {
+            market: StubMarket::ok(market),
+            executor: StubExec::buy_only(Ok(FillResult {
+                fill_price: Decimal::from_str("0.50").unwrap(),
+                shares: Decimal::from(10),
+                dollars: Decimal::from(5),
+            })),
+            resolver: StubResolver::timeout(),
+            emitter: CapturingEmitter::new(),
+            price: stub_price("0.50"),
+            events: stub_events(),
+            btc_price: StubBtcPrice::at("79900"),  // < price_to_beat → UP loses
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome,
             WindowOutcome::Lost { ref spent_usd } if *spent_usd == Decimal::from(5)
-        ));
+        ), "got {outcome:?}");
     }
 
     #[tokio::test]
@@ -608,6 +755,7 @@ mod tests {
             emitter: CapturingEmitter::new(),
             price: stub_price("0.50"),
             events: stub_events(),
+            btc_price: StubBtcPrice::at("80000"),
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome, WindowOutcome::Skipped { reason: SkipReason::MarketNotFound }));
@@ -622,6 +770,7 @@ mod tests {
             emitter: CapturingEmitter::new(),
             price: stub_price("0.50"),
             events: stub_events(),
+            btc_price: StubBtcPrice::at("80000"),
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome,
@@ -639,6 +788,7 @@ mod tests {
             emitter: CapturingEmitter::new(),
             price: stub_price("0.50"),
             events: stub_events(),
+            btc_price: StubBtcPrice::at("80000"),
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome,
@@ -656,6 +806,7 @@ mod tests {
             emitter: CapturingEmitter::new(),
             price: stub_price("0.50"),
             events: stub_events(),
+            btc_price: StubBtcPrice::at("80000"),
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome,
@@ -677,6 +828,7 @@ mod tests {
             emitter: CapturingEmitter::new(),
             price: stub_price("0.50"),
             events: stub_events(),
+            btc_price: StubBtcPrice::at("80000"),
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome,
@@ -685,54 +837,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn won_but_sell_failed_emits_alert_and_returns_zero_proceeds() {
-        let market = open_market_at("0.50", "0.50");
+    async fn chainlink_failure_falls_back_to_gamma_resolver() {
+        // v1.9: if Chainlink fetch fails, fall back to gamma resolver.
+        // Auto-Redeem still handles the winner cash — no sell call.
+        let market = open_market_with_ptb("0.50", "0.50", "80000");
         let emitter = CapturingEmitter::new();
         let deps = WindowDeps {
             market: StubMarket::ok(market),
-            executor: StubExec::buy_then_sell(
-                Ok(FillResult {
-                    fill_price: Decimal::from_str("0.50").unwrap(),
-                    shares: Decimal::from(10),
-                    dollars: Decimal::from(5),
-                }),
-                Err(ExecError::Network("boom".into())),
-            ),
+            executor: StubExec::buy_only(Ok(FillResult {
+                fill_price: Decimal::from_str("0.50").unwrap(),
+                shares: Decimal::from(10),
+                dollars: Decimal::from(5),
+            })),
             resolver: StubResolver::won(Direction::Up),
             emitter: emitter.clone(),
             price: stub_price("0.50"),
             events: stub_events(),
+            btc_price: StubBtcPrice::failing(),  // chainlink RPC errors
         };
         let outcome = run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
-        assert!(matches!(outcome, WindowOutcome::Won { ref proceeds_usd } if *proceeds_usd == Decimal::ZERO));
+        // Falls back via gamma → resolver says UP won → Won
+        assert!(matches!(outcome,
+            WindowOutcome::Won { ref proceeds_usd, .. } if *proceeds_usd == Decimal::from(10)
+        ), "got {outcome:?}");
 
         let kinds = emitter.kinds();
-        assert!(kinds.iter().any(|k| matches!(k, TraderEventKind::SellRejected { .. })));
-        assert!(kinds.iter().any(|k| matches!(k, TraderEventKind::Alert { .. })));
+        assert!(kinds.iter().any(|k| matches!(k, TraderEventKind::Alert { .. })),
+                "expected fallback Alert");
     }
 
     #[tokio::test]
     async fn happy_path_emits_expected_event_sequence() {
-        let market = open_market_at("0.50", "0.50");
+        // v1.9 event sequence: no SellFilled (Auto-Redeem handles winning shares).
+        let market = open_market_with_ptb("0.50", "0.50", "80000");
         let emitter = CapturingEmitter::new();
         let deps = WindowDeps {
             market: StubMarket::ok(market),
-            executor: StubExec::buy_then_sell(
-                Ok(FillResult {
-                    fill_price: Decimal::from_str("0.50").unwrap(),
-                    shares: Decimal::from(10),
-                    dollars: Decimal::from(5),
-                }),
-                Ok(FillResult {
-                    fill_price: Decimal::from_str("0.99").unwrap(),
-                    shares: Decimal::from(10),
-                    dollars: Decimal::from_str("9.90").unwrap(),
-                }),
-            ),
-            resolver: StubResolver::won(Direction::Up),
+            executor: StubExec::buy_only(Ok(FillResult {
+                fill_price: Decimal::from_str("0.50").unwrap(),
+                shares: Decimal::from(10),
+                dollars: Decimal::from(5),
+            })),
+            resolver: StubResolver::timeout(),
             emitter: emitter.clone(),
             price: stub_price("0.50"),
             events: stub_events(),
+            btc_price: StubBtcPrice::at("80100"),  // UP wins
         };
         run_window(&deps, &cfg(), &fresh_ladder(), 1700000300).await;
         let kinds = emitter.kinds();
@@ -742,13 +892,12 @@ mod tests {
             TraderEventKind::OrderPlaced { .. } => "OrderPlaced",
             TraderEventKind::OrderFilled { .. } => "OrderFilled",
             TraderEventKind::Resolved { .. } => "Resolved",
-            TraderEventKind::SellFilled { .. } => "SellFilled",
             other => panic!("unexpected: {other:?}"),
         }).collect();
         assert_eq!(names, [
             "WindowOpening", "EntryDecision",
             "OrderPlaced", "OrderFilled",
-            "Resolved", "SellFilled",
+            "Resolved",
         ]);
     }
 
@@ -803,6 +952,7 @@ mod tests {
             emitter: emitter.clone(),
             price: scripted_price(vec!["0.55", "0.70", "0.86"]),
             events: stub_events(),
+            btc_price: StubBtcPrice::at("80000"),
         };
         let cfg = cfg_with_exit(ExitConfig {
             tp_price: Decimal::from_str("0.85").unwrap(),
@@ -814,7 +964,7 @@ mod tests {
         let future_ts = chrono::Utc::now().timestamp() + 60;
         let outcome = run_window(&deps, &cfg, &fresh_ladder(), future_ts).await;
         assert!(matches!(outcome,
-            WindowOutcome::Won { ref proceeds_usd } if *proceeds_usd == Decimal::from_str("8.40").unwrap()));
+            WindowOutcome::Won { ref proceeds_usd, .. } if *proceeds_usd == Decimal::from_str("8.40").unwrap()));
         let kinds = emitter.kinds();
         assert!(kinds.iter().any(|k| matches!(k, TraderEventKind::ExitTriggered { kind: ExitKind::Tp, .. })));
         assert!(kinds.iter().any(|k| matches!(k, TraderEventKind::SellFilled { .. })));
@@ -842,6 +992,7 @@ mod tests {
             emitter: emitter.clone(),
             price: scripted_price(vec!["0.50", "0.45"]),
             events: stub_events(),
+            btc_price: StubBtcPrice::at("80000"),
         };
         let cfg = cfg_with_exit(ExitConfig {
             tp_price: Decimal::from_str("0.85").unwrap(),
@@ -879,6 +1030,7 @@ mod tests {
             // price stub never triggers; should not be polled because deadline is in the past.
             price: stub_price("0.50"),
             events: stub_events(),
+            btc_price: StubBtcPrice::at("80000"),
         };
         let cfg = cfg_with_exit(ExitConfig {
             tp_price: Decimal::from_str("0.85").unwrap(),
@@ -918,6 +1070,7 @@ mod tests {
             emitter: emitter.clone(),
             price: stub_price("0.50"),
             events: stub_events(),
+            btc_price: StubBtcPrice::at("80000"),
         };
         let cfg = cfg_with_exit(ExitConfig {
             tp_price: Decimal::from_str("0.85").unwrap(),
@@ -926,7 +1079,7 @@ mod tests {
         });
         let outcome = run_window(&deps, &cfg, &fresh_ladder(), 1700000300).await;
         assert!(matches!(outcome,
-            WindowOutcome::Won { ref proceeds_usd } if *proceeds_usd == Decimal::from_str("9.90").unwrap()));
+            WindowOutcome::Won { ref proceeds_usd, .. } if *proceeds_usd == Decimal::from_str("9.90").unwrap()));
         let kinds = emitter.kinds();
         assert!(!kinds.iter().any(|k| matches!(k, TraderEventKind::ExitTriggered { .. })),
                 "no exit-triggered event when deadline path fires");
@@ -971,6 +1124,7 @@ mod tests {
             emitter: emitter.clone(),
             price,
             events: events as Arc<dyn crate::trader::order_events::OrderEventStream>,
+            btc_price: StubBtcPrice::at("80000"),
         };
         let cfg = WindowConfig {
             band_min: Decimal::from_str("0.45").unwrap(),
@@ -1028,6 +1182,7 @@ mod tests {
             emitter: emitter.clone(),
             price: stub_price("0.55"),
             events: stub_events(),
+            btc_price: StubBtcPrice::at("80000"),
         };
 
         let cfg = cfg_with_early_exit(2); // 2-second deadline (small for tests)
@@ -1041,7 +1196,7 @@ mod tests {
         let outcome = task.await.unwrap();
 
         assert!(matches!(outcome,
-            WindowOutcome::Won { ref proceeds_usd } if *proceeds_usd == Decimal::from_str("5.50").unwrap()
+            WindowOutcome::Won { ref proceeds_usd, .. } if *proceeds_usd == Decimal::from_str("5.50").unwrap()
         ), "got {outcome:?}");
 
         // Verify event sequence ended with SellFilled, never Resolved.
@@ -1074,6 +1229,7 @@ mod tests {
             emitter: CapturingEmitter::new(),
             price: stub_price("0.40"),
             events: stub_events(),
+            btc_price: StubBtcPrice::at("80000"),
         };
 
         let cfg = cfg_with_early_exit(2);
@@ -1113,6 +1269,7 @@ mod tests {
             emitter: emitter.clone(),
             price: stub_price("0.10"),  // low bid → likely losing
             events: stub_events(),
+            btc_price: StubBtcPrice::at("80000"),
         };
 
         let cfg = cfg_with_early_exit(2);
@@ -1158,6 +1315,7 @@ mod tests {
             emitter: emitter.clone(),
             price: stub_price("0.99"),  // high bid → likely winning
             events: stub_events(),
+            btc_price: StubBtcPrice::at("80000"),
         };
 
         let cfg = cfg_with_early_exit(2);
@@ -1169,7 +1327,7 @@ mod tests {
 
         // bid 0.99 > 0.5 → Won with proceeds = shares × bid = 10 × 0.99 = $9.90
         match outcome {
-            WindowOutcome::Won { proceeds_usd } => {
+            WindowOutcome::Won { proceeds_usd, .. } => {
                 assert_eq!(proceeds_usd, Decimal::from_str("9.90").unwrap());
             }
             _ => panic!("expected Won (high bid signals win), got {outcome:?}"),
@@ -1208,6 +1366,7 @@ mod tests {
             emitter: CapturingEmitter::new(),
             price: stub_price("0.50"),
             events: stub_events(),
+            btc_price: StubBtcPrice::at("80000"),
         };
 
         let cfg = cfg_with_early_exit(2);

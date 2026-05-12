@@ -67,7 +67,7 @@ async fn maker_event_sequence_roundtrips_through_redis_stream() {
     let session_id = uuid::Uuid::new_v4();
     let ladder = poly_tui::trader::ladder::LadderState::new(
         poly_tui::trader::ladder::Direction::Up,
-        Decimal::from(5), 5, Utc::now(),
+        5, 5, Utc::now(),
     );
 
     let evt_kinds = vec![
@@ -167,7 +167,7 @@ async fn run_maker_full_window_redis_emits_expected_events() {
         down_ask: Decimal::from_str("0.50").unwrap(),
         closed: false, winner: None, price_to_beat: None,
     };
-    let ladder = LadderState::new(Direction::Up, Decimal::from(5), 5, Utc::now());
+    let ladder = LadderState::new(Direction::Up, 5, 5, Utc::now());
 
     let outcome = run_maker(
         &MakerDeps { executor, events, price, emitter: emitter.clone() },
@@ -179,6 +179,7 @@ async fn run_maker_full_window_redis_emits_expected_events() {
             poll: Duration::from_millis(50),
         },
         market.window_ts,
+        300,
         CancellationToken::new(),
     ).await;
 

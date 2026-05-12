@@ -29,12 +29,13 @@ pub fn run_strategy(
     windows: &[WindowMeta],
     oracle: &dyn TokenPriceOracle,
 ) -> StrategyRunResult {
+    // LadderState now uses u32 share counts; backtest keeps dollar-based stakes
+    // for parity with the v1.4 baseline. We pass a placeholder base_shares=5
+    // (the Polymarket minimum) since the actual stake comes from the manual
+    // dollar computation below — the ladder's role here is FSM state only.
     let make_ladder = || LadderState::new(
         strategy.direction,
-        match &strategy.stake {
-            StakeRule::Martingale { base, .. } => *base,
-            StakeRule::Fixed { stake } => *stake,
-        },
+        5,
         match &strategy.stake {
             StakeRule::Martingale { max_step, .. } => *max_step,
             StakeRule::Fixed { .. } => 5,
@@ -57,7 +58,12 @@ pub fn run_strategy(
         }
 
         let stake = match &strategy.stake {
-            StakeRule::Martingale { .. } => ladder.current_bet_usd(),
+            StakeRule::Martingale { base, .. } => {
+                // step N → base × 2^(N-1). Manual dollar computation; ladder
+                // only tracks FSM state, not share counts here.
+                let multiplier = 2_u32.pow((ladder.current_step - 1) as u32);
+                *base * Decimal::from(multiplier)
+            }
             StakeRule::Fixed { stake } => *stake,
         };
         let step_before = ladder.current_step;

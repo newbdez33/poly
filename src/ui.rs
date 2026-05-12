@@ -447,7 +447,7 @@ mod tests {
             ts: fixed_now(),
             session_id: Uuid::nil(),
             kind: TraderEventKind::SessionStarted,
-            ladder: LadderState::new(Direction::Up, Decimal::from(5), 5, fixed_now()),
+            ladder: LadderState::new(Direction::Up, 5, 5, fixed_now()),
         }
     }
 
@@ -461,7 +461,7 @@ mod tests {
             kind: TraderEventKind::SessionStopped {
                 reason: StopReason::CapReached,
             },
-            ladder: LadderState::new(Direction::Up, Decimal::from(5), 5, fixed_now()),
+            ladder: LadderState::new(Direction::Up, 5, 5, fixed_now()),
         }
     }
 

@@ -22,7 +22,7 @@ async fn start_redis() -> (testcontainers::ContainerAsync<Redis>, String) {
 async fn save_load_clear_roundtrip() {
     let (_node, url) = start_redis().await;
     let store = RedisTraderState::connect(&url).await.unwrap();
-    let s = LadderState::new(Direction::Up, Decimal::from(5), 5, Utc::now());
+    let s = LadderState::new(Direction::Up, 5, 5, Utc::now());
 
     assert!(store.load().await.unwrap().is_none());
     store.save(&s).await.unwrap();
@@ -116,7 +116,7 @@ async fn stream_emit_then_tail_history() {
     let (_node, url) = start_redis().await;
     let stream = RedisTraderStream::connect(&url).await.unwrap();
 
-    let s = LadderState::new(Direction::Up, Decimal::from(5), 5, Utc::now());
+    let s = LadderState::new(Direction::Up, 5, 5, Utc::now());
     for _ in 0..3 {
         let ev = TraderEvent {
             ts: Utc::now(),
@@ -140,7 +140,7 @@ async fn stream_live_receives_new_events() {
     let mut live = tail.live;
 
     // Emit a fresh event after subscribing.
-    let s = LadderState::new(Direction::Up, Decimal::from(5), 5, Utc::now());
+    let s = LadderState::new(Direction::Up, 5, 5, Utc::now());
     let ev = TraderEvent {
         ts: Utc::now(),
         session_id: Uuid::nil(),

@@ -166,7 +166,7 @@ async fn given_session(world: &mut AppWorld, dir: String, base: u32, max_step: u
     };
     world.trader_ladder = Some(TLadderState::new(
         direction,
-        Decimal::from(base),
+        base,
         max_step as u8,
         Utc::now(),
     ));
@@ -183,12 +183,13 @@ async fn given_ladder_at_step(world: &mut AppWorld, n: String) {
 }
 
 #[when(regex = r#"^the trader records a win paying \$([0-9.]+) on a \$([0-9.]+) bet$"#)]
-async fn when_win(world: &mut AppWorld, proceeds: String, _bet: String) {
+async fn when_win(world: &mut AppWorld, proceeds: String, bet: String) {
     let l = world.trader_ladder.as_mut().expect("ladder not initialised");
     let next = apply_outcome(
         l,
         &WindowOutcome::Won {
             proceeds_usd: Decimal::from_str(&proceeds).unwrap(),
+            cost_usd: Decimal::from_str(&bet).unwrap(),
         },
         Utc::now(),
     );
@@ -225,7 +226,9 @@ async fn when_skip(world: &mut AppWorld) {
 async fn when_loses_5(world: &mut AppWorld) {
     let l = world.trader_ladder.as_mut().expect("ladder not initialised");
     for _ in 0..5 {
-        let bet = l.current_bet_usd();
+        // Step N → bet = shares × $1.00 (BDD feature scenario assumes
+        // unit-ask pricing so bets are 5, 10, 20, 40, 80 = $155 total).
+        let bet = l.current_bet_dollars(Decimal::ONE);
         let next = apply_outcome(l, &WindowOutcome::Lost { spent_usd: bet }, Utc::now());
         *l = next;
     }

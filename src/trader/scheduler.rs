@@ -148,7 +148,7 @@ mod tests {
     }
 
     fn ladder() -> LadderState {
-        LadderState::new(Direction::Up, Decimal::from(5), 5, Utc::now())
+        LadderState::new(Direction::Up, 5, 5, Utc::now())
     }
 
     #[tokio::test]
@@ -157,9 +157,9 @@ mod tests {
         let deps = SchedulerDeps {
             window_exec: Arc::new(ScriptedWindowExec {
                 outcomes: Mutex::new(vec![
-                    WindowOutcome::Won { proceeds_usd: Decimal::from(10) },
-                    WindowOutcome::Won { proceeds_usd: Decimal::from(10) },
-                    WindowOutcome::Won { proceeds_usd: Decimal::from(10) },
+                    WindowOutcome::Won { proceeds_usd: Decimal::from(10), cost_usd: Decimal::from(5) },
+                    WindowOutcome::Won { proceeds_usd: Decimal::from(10), cost_usd: Decimal::from(5) },
+                    WindowOutcome::Won { proceeds_usd: Decimal::from(10), cost_usd: Decimal::from(5) },
                 ]),
             }),
             state_store: Arc::new(InMemoryStore::default()),

@@ -70,7 +70,7 @@ mod tests {
     use std::str::FromStr;
 
     fn fake_ladder() -> LadderState {
-        LadderState::new(Direction::Up, Decimal::from(5), 5,
+        LadderState::new(Direction::Up, 5, 5,
                          Utc.timestamp_opt(1700000000, 0).unwrap())
     }
 
@@ -129,7 +129,7 @@ mod tests {
         let e = fake_event(TraderEventKind::LadderUpdated {
             from_step: 2,
             to_step: 1,
-            outcome: WindowOutcome::Won { proceeds_usd: Decimal::from(10) },
+            outcome: WindowOutcome::Won { proceeds_usd: Decimal::from(10), cost_usd: Decimal::from(5) },
         });
         let back: TraderEvent = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
         assert_eq!(e, back);

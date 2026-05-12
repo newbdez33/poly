@@ -37,16 +37,16 @@ pub fn simulate_window(
             }
             ExitRule::TpOnlyOrHold { tp_price } => {
                 if bid >= *tp_price {
-                    return WindowOutcome::Won { proceeds_usd: proceeds };
+                    return WindowOutcome::Won { proceeds_usd: proceeds, cost_usd: dollars_spent };
                 }
             }
             ExitRule::TpSlOrHold { tp_price, sl_price } => {
                 if bid >= *tp_price {
-                    return WindowOutcome::Won { proceeds_usd: proceeds };
+                    return WindowOutcome::Won { proceeds_usd: proceeds, cost_usd: dollars_spent };
                 }
                 if bid <= *sl_price {
                     return if proceeds > dollars_spent {
-                        WindowOutcome::Won { proceeds_usd: proceeds }
+                        WindowOutcome::Won { proceeds_usd: proceeds, cost_usd: dollars_spent }
                     } else {
                         WindowOutcome::Lost { spent_usd: dollars_spent - proceeds }
                     };
@@ -54,18 +54,18 @@ pub fn simulate_window(
             }
             ExitRule::FixedTime { seconds } if t >= *seconds => {
                 return if proceeds > dollars_spent {
-                    WindowOutcome::Won { proceeds_usd: proceeds }
+                    WindowOutcome::Won { proceeds_usd: proceeds, cost_usd: dollars_spent }
                 } else {
                     WindowOutcome::Lost { spent_usd: dollars_spent - proceeds }
                 };
             }
             ExitRule::TpOnlyOrEarlyExit { tp_price, exit_at_secs } => {
                 if bid >= *tp_price {
-                    return WindowOutcome::Won { proceeds_usd: proceeds };
+                    return WindowOutcome::Won { proceeds_usd: proceeds, cost_usd: dollars_spent };
                 }
                 if t >= *exit_at_secs {
                     return if proceeds > dollars_spent {
-                        WindowOutcome::Won { proceeds_usd: proceeds }
+                        WindowOutcome::Won { proceeds_usd: proceeds, cost_usd: dollars_spent }
                     } else {
                         WindowOutcome::Lost { spent_usd: dollars_spent - proceeds }
                     };
@@ -78,7 +78,7 @@ pub fn simulate_window(
     // 4. Hold to resolution: use winner from window meta
     let our_won = window.winner == Some(config.direction);
     if our_won {
-        WindowOutcome::Won { proceeds_usd: shares * dec!(0.99) }
+        WindowOutcome::Won { proceeds_usd: shares * dec!(0.99), cost_usd: dollars_spent }
     } else {
         WindowOutcome::Lost { spent_usd: dollars_spent }
     }
@@ -238,7 +238,7 @@ mod tests {
             &oracle, dec!(5)
         );
         match outcome {
-            WindowOutcome::Won { proceeds_usd } => {
+            WindowOutcome::Won { proceeds_usd, .. } => {
                 // 10 shares × 0.55 = 5.50 (vs 10 × 0.50 = 5.00 spent)
                 assert!(proceeds_usd >= dec!(5.40) && proceeds_usd <= dec!(5.60));
             }
@@ -345,7 +345,7 @@ mod tests {
             &oracle, dec!(5),
         );
         match outcome {
-            WindowOutcome::Won { proceeds_usd } => {
+            WindowOutcome::Won { proceeds_usd, .. } => {
                 // 10 shares × 0.60 = 6.00
                 assert!(proceeds_usd >= dec!(5.95) && proceeds_usd <= dec!(6.05),
                         "proceeds_usd={proceeds_usd}");

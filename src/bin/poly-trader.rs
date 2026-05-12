@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use poly_tui::config::Config;
 use poly_tui::trader::adapters::{
+    chainlink_btc_wrapper::HttpChainlinkFeed,
     clob_executor_wrapper::ClobOrderExecutor,
     gamma_price_wrapper::GammaPriceFetcher,
     gamma_wrapper::GammaMarketDiscovery,
@@ -9,6 +10,7 @@ use poly_tui::trader::adapters::{
     redis_stream_wrapper::RedisTraderStream,
     simulated_executor::SimulatedExecutor,
 };
+use poly_tui::tui::market_watch::BtcPriceFeed;
 use poly_tui::trader::config::{ExitRuleArg, TraderArgs};
 use poly_tui::trader::errors::StateError;
 use poly_tui::trader::event::TraderEventEmitter;
@@ -22,6 +24,7 @@ use poly_tui::trader::resolver::{PolymarketResolver, WindowResolver};
 use poly_tui::trader::scheduler::{run, SchedulerConfig, SchedulerDeps, WindowExecutor};
 use poly_tui::trader::state::TraderStateStore;
 use poly_tui::trader::window::{run_window, WindowConfig, WindowDeps};
+use rust_decimal::prelude::ToPrimitive;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -134,6 +137,12 @@ async fn main() -> Result<()> {
         GammaPriceFetcher::new(gamma_host.clone()),
     );
 
+    // v1.9: Chainlink BTC/USD oracle for pre-close outcome determination.
+    let btc_price: Arc<dyn BtcPriceFeed> = Arc::new(
+        HttpChainlinkFeed::connect(&cfg.polygon_rpc_url).await
+            .context("connecting Chainlink BTC feed")?,
+    );
+
     // WindowExecutor adapter (binds run_window over our deps)
     let window_deps = Arc::new(WindowDeps {
         market: market.clone(),
@@ -142,6 +151,7 @@ async fn main() -> Result<()> {
         emitter: emitter.clone(),
         price: price.clone(),
         events: events.clone(),
+        btc_price: btc_price.clone(),
     });
     let exit_cfg = match args.exit_rule {
         ExitRuleArg::Hold => None,
@@ -221,7 +231,11 @@ async fn restore_or_init(
         _ => {
             store.clear().await?;
             let direction: Direction = args.direction.into();
-            Ok(LadderState::new(direction, args.base, args.max_step, chrono::Utc::now())
+            // TraderArgs::base is still Decimal for backward-compat with the
+            // --base flag; convert to u32 shares for the LadderState API.
+            // User-facing rename to --base-shares is a follow-up task.
+            let base_shares = args.base.to_u32().unwrap_or(5);
+            Ok(LadderState::new(direction, base_shares, args.max_step, chrono::Utc::now())
                 .with_window_minutes(args.window_minutes))
         }
     }

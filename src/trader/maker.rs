@@ -292,7 +292,7 @@ async fn sell_with_tp_sl(
                         emit(&deps.emitter, ladder, TraderEventKind::Alert {
                             message: format!("end-of-window sell failed; shares stuck for token {token_id}"),
                         }).await;
-                        return WindowOutcome::Won { proceeds_usd: tp_partial_proceeds };
+                        return WindowOutcome::Won { proceeds_usd: tp_partial_proceeds, cost_usd: buy_fill.dollars };
                     }
                 };
                 emit(&deps.emitter, ladder, TraderEventKind::SellFilled {
@@ -321,7 +321,7 @@ async fn sell_with_tp_sl(
                                 emit(&deps.emitter, ladder, TraderEventKind::Alert {
                                     message: format!("sl sell failed; shares stuck for token {token_id}"),
                                 }).await;
-                                return WindowOutcome::Won { proceeds_usd: tp_partial_proceeds };
+                                return WindowOutcome::Won { proceeds_usd: tp_partial_proceeds, cost_usd: buy_fill.dollars };
                             }
                         };
                         emit(&deps.emitter, ladder, TraderEventKind::SellFilled {
@@ -401,7 +401,7 @@ async fn market_sell_residual(
             emit(&deps.emitter, ladder, TraderEventKind::Alert {
                 message: format!("market sell failed; shares stuck for token {token_id}"),
             }).await;
-            return WindowOutcome::Won { proceeds_usd: Decimal::ZERO };
+            return WindowOutcome::Won { proceeds_usd: Decimal::ZERO, cost_usd: cost };
         }
     };
     emit(&deps.emitter, ladder, TraderEventKind::SellFilled { proceeds_usd: sell_fill.dollars }).await;
@@ -410,7 +410,7 @@ async fn market_sell_residual(
 
 fn final_outcome(buy_dollars: Decimal, total_proceeds: Decimal) -> WindowOutcome {
     if total_proceeds > buy_dollars {
-        WindowOutcome::Won { proceeds_usd: total_proceeds }
+        WindowOutcome::Won { proceeds_usd: total_proceeds, cost_usd: buy_dollars }
     } else {
         WindowOutcome::Lost { spent_usd: buy_dollars - total_proceeds }
     }
@@ -557,7 +557,7 @@ mod tests {
     }
 
     fn fresh_ladder() -> LadderState {
-        LadderState::new(Direction::Up, Decimal::from(5), 5, Utc::now())
+        LadderState::new(Direction::Up, 5, 5, Utc::now())
     }
 
     fn cfg() -> ExitConfig {
@@ -619,7 +619,7 @@ mod tests {
         ).await;
 
         let proceeds = match outcome {
-            WindowOutcome::Won { proceeds_usd } => proceeds_usd,
+            WindowOutcome::Won { proceeds_usd, .. } => proceeds_usd,
             other => panic!("expected Won, got {other:?}"),
         };
         // 10 sh x 0.85 = 8.50 proceeds

@@ -116,7 +116,7 @@ mod tests {
     fn won(ts: i64, pnl: Decimal) -> WindowResult {
         WindowResult {
             window_ts: ts, stake: dec!(5),
-            outcome: WindowOutcome::Won { proceeds_usd: dec!(9.90) },
+            outcome: WindowOutcome::Won { proceeds_usd: dec!(9.90), cost_usd: dec!(5) },
             ladder_step_before: 1, ladder_step_after: 1,
             ladder_pnl_after: pnl,
         }

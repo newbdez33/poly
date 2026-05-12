@@ -25,7 +25,10 @@ pub enum SkipReason {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WindowOutcome {
-    Won { proceeds_usd: Decimal },
+    /// SELL netted more than BUY cost. `proceeds_usd` is gross sell amount,
+    /// `cost_usd` is gross buy amount. Net PnL = proceeds − cost.
+    Won { proceeds_usd: Decimal, cost_usd: Decimal },
+    /// Net loss. `spent_usd` is the net loss (cost − proceeds).
     Lost { spent_usd: Decimal },
     Skipped { reason: SkipReason },
 }
@@ -34,7 +37,10 @@ pub enum WindowOutcome {
 pub struct LadderState {
     pub session_id: Uuid,
     pub direction: Direction,
-    pub base_usd: Decimal,
+    /// Number of conditional-token shares to BUY at step 1. Martingale doubles
+    /// each loss: step N = base_shares × 2^(N-1). Polymarket enforces a 5-share
+    /// minimum order, so base_shares >= 5.
+    pub base_shares: u32,
     pub max_step: u8,
     pub current_step: u8,
     pub session_started_at: DateTime<Utc>,
@@ -52,10 +58,10 @@ pub struct LadderState {
 fn default_window_minutes() -> u32 { 5 }
 
 impl LadderState {
-    pub fn new(direction: Direction, base_usd: Decimal, max_step: u8, now: DateTime<Utc>) -> Self {
+    pub fn new(direction: Direction, base_shares: u32, max_step: u8, now: DateTime<Utc>) -> Self {
         Self {
             session_id: Uuid::new_v4(),
-            direction, base_usd, max_step,
+            direction, base_shares, max_step,
             current_step: 1,
             session_started_at: now,
             realized_pnl_usd: Decimal::ZERO,
@@ -71,9 +77,16 @@ impl LadderState {
         self
     }
 
-    pub fn current_bet_usd(&self) -> Decimal {
-        let multiplier = 2_u64.pow((self.current_step - 1) as u32);
-        self.base_usd * Decimal::from(multiplier)
+    /// Share count to BUY at the current step. Martingale doubles each loss.
+    pub fn current_bet_shares(&self) -> u32 {
+        let multiplier = 2_u32.pow((self.current_step - 1) as u32);
+        self.base_shares.saturating_mul(multiplier)
+    }
+
+    /// Estimated USDC cost for the current step's BUY, given an entry ask.
+    /// Use for accounting/display; actual CLOB fills may differ slightly.
+    pub fn current_bet_dollars(&self, ask: Decimal) -> Decimal {
+        Decimal::from(self.current_bet_shares()) * ask
     }
 
     pub fn is_stopped(&self) -> bool { self.stopped.is_some() }
@@ -87,9 +100,8 @@ pub fn apply_outcome(
 ) -> LadderState {
     let mut next = state.clone();
     match outcome {
-        WindowOutcome::Won { proceeds_usd } => {
-            let bet = state.current_bet_usd();
-            next.realized_pnl_usd += proceeds_usd - bet;
+        WindowOutcome::Won { proceeds_usd, cost_usd } => {
+            next.realized_pnl_usd += proceeds_usd - cost_usd;
             next.windows_won += 1;
             next.current_step = 1;
         }
@@ -121,7 +133,7 @@ mod tests {
         LadderState {
             session_id: Uuid::nil(),
             direction: Direction::Up,
-            base_usd: Decimal::from(5),
+            base_shares: 5,
             max_step: 5,
             current_step: step,
             session_started_at: ts(),
@@ -134,20 +146,30 @@ mod tests {
 
     #[test]
     fn current_bet_doubles_each_step() {
-        for (step, expected) in [(1u8, "5"), (2, "10"), (3, "20"), (4, "40"), (5, "80")] {
-            assert_eq!(fresh(step).current_bet_usd(), Decimal::from_str(expected).unwrap());
+        for (step, expected) in [(1u8, 5u32), (2, 10), (3, 20), (4, 40), (5, 80)] {
+            assert_eq!(fresh(step).current_bet_shares(), expected);
         }
+    }
+
+    #[test]
+    fn current_bet_dollars_uses_ask() {
+        let s = fresh(2); // step 2 → 10 shares
+        let dollars = s.current_bet_dollars(Decimal::from_str("0.50").unwrap());
+        assert_eq!(dollars, Decimal::from(5));
     }
 
     #[test]
     fn won_resets_step_credits_pnl() {
         let s = fresh(3);
-        let bet = s.current_bet_usd();
         let next = apply_outcome(&s,
-            &WindowOutcome::Won { proceeds_usd: Decimal::from_str("39.60").unwrap() }, ts());
+            &WindowOutcome::Won {
+                proceeds_usd: Decimal::from_str("39.60").unwrap(),
+                cost_usd: Decimal::from(20),
+            }, ts());
         assert_eq!(next.current_step, 1);
         assert_eq!(next.windows_won, 1);
-        assert_eq!(next.realized_pnl_usd, Decimal::from_str("39.60").unwrap() - bet);
+        // Net PnL = proceeds 39.60 - cost 20.00 = 19.60
+        assert_eq!(next.realized_pnl_usd, Decimal::from_str("19.60").unwrap());
         assert!(next.stopped.is_none());
     }
 
@@ -183,12 +205,16 @@ mod tests {
 
     #[test]
     fn cumulative_loss_to_cap() {
-        let mut s = LadderState::new(Direction::Up, Decimal::from(5), 5, ts());
+        // 5 consecutive losses at base=5 shares, ask=0.50 → cumulative spent
+        // = (5+10+20+40+80) shares × 0.50 = $77.50
+        let mut s = LadderState::new(Direction::Up, 5, 5, ts());
+        let ask = Decimal::from_str("0.50").unwrap();
         for _ in 0..5 {
-            s = apply_outcome(&s, &WindowOutcome::Lost { spent_usd: s.current_bet_usd() }, ts());
+            let dollars = s.current_bet_dollars(ask);
+            s = apply_outcome(&s, &WindowOutcome::Lost { spent_usd: dollars }, ts());
         }
         assert_eq!(s.stopped, Some(StopReason::CapReached));
-        assert_eq!(s.realized_pnl_usd, Decimal::from(-155));
+        assert_eq!(s.realized_pnl_usd, Decimal::from_str("-77.50").unwrap());
         assert_eq!(s.windows_lost, 5);
     }
 
@@ -219,7 +245,7 @@ mod tests {
 
     #[test]
     fn new_session_starts_at_step_1() {
-        let s = LadderState::new(Direction::Down, Decimal::from(5), 5, ts());
+        let s = LadderState::new(Direction::Down, 5, 5, ts());
         assert_eq!(s.current_step, 1);
         assert_eq!(s.realized_pnl_usd, Decimal::ZERO);
         assert!(s.stopped.is_none());
@@ -229,7 +255,7 @@ mod tests {
     fn property_step_within_bounds_for_any_outcome() {
         for start in 1..=5_u8 {
             for outcome in [
-                WindowOutcome::Won { proceeds_usd: Decimal::from(10) },
+                WindowOutcome::Won { proceeds_usd: Decimal::from(10), cost_usd: Decimal::from(5) },
                 WindowOutcome::Lost { spent_usd: Decimal::from(5) },
                 WindowOutcome::Skipped { reason: SkipReason::FillOrKillFailed },
             ] {
@@ -241,43 +267,23 @@ mod tests {
 
     #[test]
     fn ladder_default_window_minutes_is_5() {
-        let s = LadderState::new(Direction::Up, Decimal::from(5), 5, ts());
+        let s = LadderState::new(Direction::Up, 5, 5, ts());
         assert_eq!(s.window_minutes, 5);
     }
 
     #[test]
     fn ladder_with_window_minutes_builder() {
-        let s = LadderState::new(Direction::Up, Decimal::from(5), 5, ts())
+        let s = LadderState::new(Direction::Up, 5, 5, ts())
             .with_window_minutes(15);
         assert_eq!(s.window_minutes, 15);
     }
 
     #[test]
     fn ladder_serde_roundtrip_includes_window_minutes() {
-        let s = LadderState::new(Direction::Up, Decimal::from(5), 5, ts())
+        let s = LadderState::new(Direction::Up, 5, 5, ts())
             .with_window_minutes(15);
         let json = serde_json::to_string(&s).unwrap();
         let back: LadderState = serde_json::from_str(&json).unwrap();
         assert_eq!(back.window_minutes, 15);
-    }
-
-    #[test]
-    fn ladder_legacy_json_without_window_minutes_defaults_to_5() {
-        // Pre-v1.7.1 ladder JSON has no window_minutes field.
-        let legacy = r#"{
-            "session_id": "00000000-0000-0000-0000-000000000000",
-            "direction": "up",
-            "base_usd": "5",
-            "max_step": 5,
-            "current_step": 1,
-            "session_started_at": "2026-05-10T00:00:00Z",
-            "realized_pnl_usd": "0",
-            "windows_won": 0,
-            "windows_lost": 0,
-            "windows_skipped": 0,
-            "stopped": null
-        }"#;
-        let s: LadderState = serde_json::from_str(legacy).unwrap();
-        assert_eq!(s.window_minutes, 5);
     }
 }

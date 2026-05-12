@@ -34,7 +34,7 @@ impl WindowExecutor for ScriptedWindowExec {
     async fn execute(&self, _l: &LadderState, _ts: i64) -> WindowOutcome {
         let mut q = self.outcomes.lock().unwrap();
         if q.is_empty() {
-            WindowOutcome::Won { proceeds_usd: Decimal::from(10) }
+            WindowOutcome::Won { proceeds_usd: Decimal::from(10), cost_usd: Decimal::from(5) }
         } else {
             q.remove(0)
         }
@@ -51,12 +51,13 @@ async fn e2e_full_session_5_wins() {
     let outcomes = (0..5)
         .map(|_| WindowOutcome::Won {
             proceeds_usd: Decimal::from_str("9.90").unwrap(),
+            cost_usd: Decimal::from(5),
         })
         .collect();
     let exec = Arc::new(ScriptedWindowExec {
         outcomes: std::sync::Mutex::new(outcomes),
     });
-    let ladder = LadderState::new(Direction::Up, Decimal::from(5), 5, Utc::now());
+    let ladder = LadderState::new(Direction::Up, 5, 5, Utc::now());
     let task = tokio::spawn(run(
         ladder,
         SchedulerDeps {
@@ -88,7 +89,7 @@ async fn e2e_cap_reached_stops_session() {
     let exec = Arc::new(ScriptedWindowExec {
         outcomes: std::sync::Mutex::new(losses),
     });
-    let ladder = LadderState::new(Direction::Up, Decimal::from(5), 5, Utc::now());
+    let ladder = LadderState::new(Direction::Up, 5, 5, Utc::now());
     let task = tokio::spawn(run(
         ladder,
         SchedulerDeps {
@@ -109,7 +110,7 @@ async fn e2e_cap_reached_stops_session() {
 async fn e2e_resume_from_redis() {
     let (_node, url) = start_redis().await;
     let store = Arc::new(RedisTraderState::connect(&url).await.unwrap());
-    let mut s = LadderState::new(Direction::Up, Decimal::from(5), 5, Utc::now());
+    let mut s = LadderState::new(Direction::Up, 5, 5, Utc::now());
     s.current_step = 4;
     s.realized_pnl_usd = Decimal::from(-35);
     store.save(&s).await.unwrap();
@@ -136,7 +137,7 @@ async fn e2e_tui_subscribes_to_stream() {
     let emitter = RedisTraderStream::connect(&url).await.unwrap();
     let stream = RedisTraderStream::connect(&url).await.unwrap();
 
-    let s = LadderState::new(Direction::Up, Decimal::from(5), 5, Utc::now());
+    let s = LadderState::new(Direction::Up, 5, 5, Utc::now());
     let ev = poly_tui::trader::event::TraderEvent {
         ts: Utc::now(),
         session_id: Uuid::nil(),
@@ -162,7 +163,7 @@ async fn e2e_exit_triggered_event_reaches_stream() {
     let emitter = RedisTraderStream::connect(&url).await.unwrap();
     let stream = RedisTraderStream::connect(&url).await.unwrap();
 
-    let ladder = LadderState::new(Direction::Up, Decimal::from(5), 5, Utc::now());
+    let ladder = LadderState::new(Direction::Up, 5, 5, Utc::now());
     let session_id = ladder.session_id;
     let event = poly_tui::trader::event::TraderEvent {
         ts: Utc::now(),

@@ -291,7 +291,7 @@ mod tests {
             ts: Utc::now(),
             session_id: Uuid::nil(),
             kind: TraderEventKind::SessionStarted,
-            ladder: LadderState::new(Direction::Up, Decimal::from(5), 5, Utc::now()),
+            ladder: LadderState::new(Direction::Up, 5, 5, Utc::now()),
         };
         handle_event(&mut s, AppEvent::TraderEvent(ev.clone()), &tx);
         assert_eq!(s.trader_log.len(), 1);
@@ -311,7 +311,7 @@ mod tests {
             let ev = TraderEvent {
                 ts: Utc::now(), session_id: Uuid::nil(),
                 kind: TraderEventKind::SessionStarted,
-                ladder: LadderState::new(Direction::Up, Decimal::from(5), 5, Utc::now()),
+                ladder: LadderState::new(Direction::Up, 5, 5, Utc::now()),
             };
             handle_event(&mut s, AppEvent::TraderEvent(ev), &tx);
         }
@@ -337,7 +337,7 @@ mod tests {
         let ev = TraderEvent {
             ts: now - Cd::seconds(120), session_id: Uuid::nil(),
             kind: TraderEventKind::SessionStarted,
-            ladder: LadderState::new(Direction::Up, Decimal::from(5), 5, now),
+            ladder: LadderState::new(Direction::Up, 5, 5, now),
         };
         assert_eq!(compute_trader_health(&Some(ev), now), TraderHealth::Healthy);
     }
@@ -354,7 +354,7 @@ mod tests {
         let ev = TraderEvent {
             ts: now - Cd::seconds(8 * 60), session_id: Uuid::nil(),
             kind: TraderEventKind::SessionStarted,
-            ladder: LadderState::new(Direction::Up, Decimal::from(5), 5, now),
+            ladder: LadderState::new(Direction::Up, 5, 5, now),
         };
         assert_eq!(compute_trader_health(&Some(ev), now), TraderHealth::Lagging);
     }
@@ -371,7 +371,7 @@ mod tests {
         let ev = TraderEvent {
             ts: now - Cd::seconds(15 * 60), session_id: Uuid::nil(),
             kind: TraderEventKind::SessionStarted,
-            ladder: LadderState::new(Direction::Up, Decimal::from(5), 5, now),
+            ladder: LadderState::new(Direction::Up, 5, 5, now),
         };
         assert_eq!(compute_trader_health(&Some(ev), now), TraderHealth::Stale);
     }
@@ -388,7 +388,7 @@ mod tests {
         let ev = TraderEvent {
             ts: now - Cd::seconds(30), session_id: Uuid::nil(),
             kind: TraderEventKind::SessionStopped { reason: StopReason::CapReached },
-            ladder: LadderState::new(Direction::Up, Decimal::from(5), 5, now),
+            ladder: LadderState::new(Direction::Up, 5, 5, now),
         };
         assert_eq!(compute_trader_health(&Some(ev), now), TraderHealth::Stopped);
     }
@@ -423,7 +423,7 @@ mod tests {
         let (mins_tx, mut mins_rx) = mpsc::channel::<u32>(8);
         state.window_minutes_tx = Some(mins_tx);
 
-        let ladder = LadderState::new(Direction::Up, Decimal::from(5), 5, chrono::Utc::now())
+        let ladder = LadderState::new(Direction::Up, 5, 5, chrono::Utc::now())
             .with_window_minutes(15);
         let ev = TraderEvent {
             ts: chrono::Utc::now(),
