@@ -193,10 +193,21 @@ async fn determine_outcome_pre_close(
     }
 
     // Determine winner from Chainlink BTC vs price_to_beat.
-    let price_to_beat = match market.price_to_beat {
+    // Gamma populates `priceToBeat` async ~5-30s after window open. The
+    // WindowMarket captured at BUY time often has price_to_beat=None.
+    // Re-fetch here — by t=window_close-4s, gamma has definitely populated it.
+    let mins = (window_seconds / 60) as u32;
+    let fresh_market = match deps.market.find_window(window_ts, mins).await {
+        Ok(m) => m,
+        Err(_) => {
+            // Stale data is acceptable here — fall back to the original market.
+            market.clone()
+        }
+    };
+    let price_to_beat = match fresh_market.price_to_beat.or(market.price_to_beat) {
         Some(p) => p,
         None => {
-            // No reference price — fall back to gamma resolver.
+            // Still no reference price — fall back to gamma resolver.
             emit_kind(deps, ladder, TraderEventKind::Alert {
                 message: "price_to_beat missing; falling back to gamma resolver".into(),
             }).await;
