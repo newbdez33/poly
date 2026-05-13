@@ -63,6 +63,7 @@ fn pick_direction_with_signal(
             }
         }
         DirectionSignal::Random { .. } => (fallback, false), // handled in run_strategy
+        DirectionSignal::RsiWithTrendFilter { .. } => (fallback, false), // handled in run_strategy
     }
 }
 
@@ -71,6 +72,20 @@ pub fn run_strategy(
     windows: &[WindowMeta],
     oracle: &dyn TokenPriceOracle,
     btc: Option<&BinanceData>,
+) -> StrategyRunResult {
+    run_strategy_with_opts(strategy, windows, oracle, btc, false)
+}
+
+/// v1.12: same as `run_strategy` but with `stop_at_cap` — when true, the
+/// runner exits at the first cap event (mirrors the live trader's
+/// `StopReason::CapReached` behavior). Used to validate that backtest
+/// reproduces a specific live session's outcome.
+pub fn run_strategy_with_opts(
+    strategy: &StrategyConfig,
+    windows: &[WindowMeta],
+    oracle: &dyn TokenPriceOracle,
+    btc: Option<&BinanceData>,
+    stop_at_cap: bool,
 ) -> StrategyRunResult {
     // LadderState now uses u32 share counts; backtest keeps dollar-based stakes
     // for parity with the v1.4 baseline. We pass a placeholder base_shares=5
@@ -98,6 +113,10 @@ pub fn run_strategy(
             cap_resets += 1;
             total_pnl += session_pnl;
             session_pnl = Decimal::ZERO;
+            if stop_at_cap {
+                // Mirror the live trader's exit-on-cap behavior for validation runs.
+                break;
+            }
             ladder = make_ladder();
         }
 
@@ -126,6 +145,36 @@ pub fn run_strategy(
                 let dir = if x & 1 == 0 { Direction::Up } else { Direction::Down };
                 (dir, false)
             }
+            Some(DirectionSignal::RsiWithTrendFilter {
+                period, oversold, overbought,
+                ema_period, slope_lookback_mins, slope_threshold,
+            }) => {
+                let rsi = btc.and_then(|b| b.rsi_at(window.window_ts, *period));
+                let slope = btc.and_then(|b| b.ema_slope_at(window.window_ts, *ema_period, *slope_lookback_mins));
+                match (rsi, slope) {
+                    (Some(rsi), Some(slope)) => {
+                        if rsi < *oversold {
+                            // Want to bet UP (mean-revert from oversold).
+                            // If trend is strongly DOWN, skip — don't fight it.
+                            if slope < -slope_threshold { (Direction::Up, true) }
+                            else { (Direction::Up, false) }
+                        } else if rsi > *overbought {
+                            // Want to bet DOWN. Skip if strong UPtrend.
+                            if slope > *slope_threshold { (Direction::Down, true) }
+                            else { (Direction::Down, false) }
+                        } else {
+                            (strategy.direction, true) // RSI neutral → skip
+                        }
+                    }
+                    // Missing data → fall back to RSI-only behavior.
+                    _ => {
+                        let dummy_signal = DirectionSignal::RsiFilterSkipNeutral {
+                            period: *period, oversold: *oversold, overbought: *overbought,
+                        };
+                        pick_direction_with_signal(&dummy_signal, rsi, prev_winner, strategy.direction)
+                    }
+                }
+            }
             Some(signal) => {
                 let rsi = btc.and_then(|b| match signal {
                     DirectionSignal::RsiDirection { period, .. }
@@ -133,7 +182,7 @@ pub fn run_strategy(
                     | DirectionSignal::RsiPlusAntiFollow { period, .. } => {
                         b.rsi_at(window.window_ts, *period)
                     }
-                    DirectionSignal::Random { .. } => None,
+                    DirectionSignal::Random { .. } | DirectionSignal::RsiWithTrendFilter { .. } => None,
                 });
                 pick_direction_with_signal(signal, rsi, prev_winner, strategy.direction)
             }

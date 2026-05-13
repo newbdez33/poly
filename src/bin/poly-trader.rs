@@ -185,6 +185,7 @@ async fn main() -> Result<()> {
         exit: exit_cfg,
         exit_at_secs: args.exit_at_secs,
         maker: args.maker,
+        tp_limit_sell: args.tp_limit_sell,
         window_seconds,
     };
     let base_exec: Arc<dyn WindowExecutor> = Arc::new(BoundWindowExec {
@@ -307,6 +308,15 @@ async fn restore_or_init(
                     s.dry_run, args.dry_run
                 );
             }
+            // v1.12: same protection for fixed-stake — mode mismatch silently
+            // changes risk profile (Martingale vs Fixed). Force --reset.
+            if s.fixed_stake != args.fixed_stake {
+                anyhow::bail!(
+                    "saved ladder is fixed_stake={}; trader invoked with fixed_stake={}. \
+                     Pass --reset to start a fresh session in the new mode.",
+                    s.fixed_stake, args.fixed_stake
+                );
+            }
             tracing::info!("resuming ladder: step={} pnl={} window_minutes={}",
                 s.current_step, s.realized_pnl_usd, s.window_minutes);
             Ok(s)
@@ -323,7 +333,8 @@ async fn restore_or_init(
             let base_shares = args.base.to_u32().unwrap_or(5);
             Ok(LadderState::new(direction, base_shares, args.max_step, chrono::Utc::now())
                 .with_window_minutes(args.window_minutes)
-                .with_dry_run(args.dry_run))
+                .with_dry_run(args.dry_run)
+                .with_fixed_stake(args.fixed_stake))
         }
     }
 }

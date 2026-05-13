@@ -90,6 +90,9 @@ pub fn handle_event(state: &mut AppState, ev: AppEvent, cmd_tx: &mpsc::Sender<Cm
             (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => state.should_quit = true,
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => state.should_quit = true,
             (KeyCode::Char('r'), _) => { let _ = cmd_tx.try_send(Cmd::ForceRefresh); }
+            (KeyCode::Char('l'), KeyModifiers::CONTROL) | (KeyCode::Char('L'), _) => {
+                state.trader_log.clear();
+            }
             _ => {}
         },
         AppEvent::TraderEvent(ev) => {
@@ -233,6 +236,43 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(1);
         handle_event(&mut s, key('r'), &tx);
         assert!(matches!(rx.try_recv().unwrap(), Cmd::ForceRefresh));
+    }
+
+    #[tokio::test]
+    async fn shift_l_clears_trader_log() {
+        let mut s = AppState::new(Duration::from_secs(30));
+        let (tx, _rx) = mpsc::channel(1);
+        // Pre-populate the trader log.
+        s.trader_log.push_back(crate::trader::event::TraderEvent {
+            ts: chrono::Utc::now(),
+            session_id: uuid::Uuid::nil(),
+            kind: crate::trader::event::TraderEventKind::SessionStarted,
+            ladder: crate::trader::ladder::LadderState::new(
+                crate::trader::ladder::Direction::Up, 5, 5, chrono::Utc::now(),
+            ),
+        });
+        assert_eq!(s.trader_log.len(), 1);
+        // Shift+L (capital L) clears.
+        let ev = AppEvent::Key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::SHIFT));
+        handle_event(&mut s, ev, &tx);
+        assert_eq!(s.trader_log.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn ctrl_l_clears_trader_log() {
+        let mut s = AppState::new(Duration::from_secs(30));
+        let (tx, _rx) = mpsc::channel(1);
+        s.trader_log.push_back(crate::trader::event::TraderEvent {
+            ts: chrono::Utc::now(),
+            session_id: uuid::Uuid::nil(),
+            kind: crate::trader::event::TraderEventKind::SessionStarted,
+            ladder: crate::trader::ladder::LadderState::new(
+                crate::trader::ladder::Direction::Up, 5, 5, chrono::Utc::now(),
+            ),
+        });
+        let ev = AppEvent::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        handle_event(&mut s, ev, &tx);
+        assert_eq!(s.trader_log.len(), 0);
     }
 
     #[tokio::test]

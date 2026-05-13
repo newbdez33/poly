@@ -441,7 +441,7 @@ fn build_status_line<'a>(state: &'a UiState) -> Line<'a> {
         None => "last: --".to_string(),
     };
     spans.push(Span::raw(last_str));
-    spans.push(Span::raw("    q quit  r refresh"));
+    spans.push(Span::raw("    q quit  r refresh  L clear-log"));
 
     Line::from(spans)
 }

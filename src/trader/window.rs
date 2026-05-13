@@ -34,6 +34,8 @@ pub struct WindowConfig {
     /// Mutually exclusive with `exit` — at most one is `Some`.
     pub exit_at_secs: Option<u32>,
     pub maker: bool,
+    /// v1.12: hybrid — taker BUY + limit SELL @ TP. Mutually exclusive with maker.
+    pub tp_limit_sell: bool,
     /// Window length in seconds (300/900/3600 for {5,15,60}-min). Threaded
     /// into `run_maker` so its cancel deadline scales with window length.
     pub window_seconds: i64,
@@ -155,10 +157,33 @@ pub async fn run_window(
             ).await
         }
         Some(exit_cfg) => {
-            // v1.5 path: race ExitWatcher vs await_resolution
-            run_with_tp_sl(
-                deps, ladder, &market, &token_id, &buy_fill, exit_cfg, window_ts,
-            ).await
+            if cfg.tp_limit_sell {
+                // v1.12 hybrid: taker BUY (already done) + limit SELL @ TP.
+                // Delegate the SELL phase to maker's `sell_with_tp_sl`, which
+                // posts a limit @ TP, watches for fills, falls back to market
+                // sell at window_close-30s.
+                let maker_deps = crate::trader::maker::MakerDeps {
+                    executor: deps.executor.clone(),
+                    events: deps.events.clone(),
+                    price: deps.price.clone(),
+                    emitter: deps.emitter.clone(),
+                };
+                let bf = crate::trader::maker::BuyFill {
+                    shares: buy_fill.shares,
+                    dollars: buy_fill.dollars,
+                    fill_price: buy_fill.fill_price,
+                };
+                crate::trader::maker::sell_with_tp_sl(
+                    &maker_deps, ladder, &market, &token_id, &bf, exit_cfg,
+                    window_ts, cfg.window_seconds,
+                    tokio_util::sync::CancellationToken::new(),
+                ).await
+            } else {
+                // v1.5 path: race ExitWatcher vs await_resolution
+                run_with_tp_sl(
+                    deps, ladder, &market, &token_id, &buy_fill, exit_cfg, window_ts,
+                ).await
+            }
         }
     }
 }
@@ -408,11 +433,19 @@ async fn winner_sweep(
     let sell_fill = match deps.executor.sell_market(token_id, buy_fill.shares).await {
         Ok(f) => f,
         Err(e) => {
+            // v1.11.12: post-resolution sell fails because the orderbook is gone
+            // once the market closes. Auto-Redeem (enabled 2026-05-12) pays
+            // winning shares $1 each on-chain ~3-10s after gamma resolution, so
+            // count the win at face value rather than a phantom loss.
+            let expected = buy_fill.shares * dec!(1.00);
             emit_kind(deps, ladder, TraderEventKind::SellRejected { reason: format!("{e}") }).await;
             emit_kind(deps, ladder, TraderEventKind::Alert {
-                message: format!("sell failed; shares stuck for token {token_id}"),
+                message: format!(
+                    "sell failed; relying on Auto-Redeem for {} shares (expected ${} USDC on-chain)",
+                    buy_fill.shares, expected,
+                ),
             }).await;
-            return WindowOutcome::Won { proceeds_usd: Decimal::ZERO, cost_usd: buy_fill.dollars };
+            return WindowOutcome::Won { proceeds_usd: expected, cost_usd: buy_fill.dollars };
         }
     };
     emit_kind(deps, ladder, TraderEventKind::SellFilled { proceeds_usd: sell_fill.dollars }).await;
@@ -680,6 +713,7 @@ mod tests {
             exit: None,
             exit_at_secs: None,
             maker: false,
+            tp_limit_sell: false,
             window_seconds: 300,
         }
     }
@@ -691,6 +725,7 @@ mod tests {
             exit: Some(exit),
             exit_at_secs: None,
             maker: false,
+            tp_limit_sell: false,
             window_seconds: 300,
         }
     }
@@ -710,6 +745,7 @@ mod tests {
             exit: None,
             exit_at_secs: None,
             maker: false,
+            tp_limit_sell: false,
             window_seconds: 900,
         };
         assert_eq!(c.window_seconds, 900);
@@ -1114,6 +1150,48 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn tp_sl_winner_sweep_sell_fail_trusts_auto_redeem() {
+        // v1.11.12: when TP/SL doesn't trigger and the post-resolution
+        // sell_market fails (orderbook gone), the trader should count the win
+        // at shares × $1.00 because Auto-Redeem credits USDC on-chain.
+        let market = open_market_with_token_ids();
+        let emitter = CapturingEmitter::new();
+        let deps = WindowDeps {
+            market: StubMarket::ok(market),
+            executor: StubExec::buy_then_sell(
+                Ok(FillResult {
+                    fill_price: Decimal::from_str("0.50").unwrap(),
+                    shares: Decimal::from(10),
+                    dollars: Decimal::from(5),
+                }),
+                Err(ExecError::FillOrKillFailed),
+            ),
+            resolver: StubResolver::won(Direction::Up),
+            emitter: emitter.clone(),
+            price: stub_price("0.50"),
+            events: stub_events(),
+            btc_price: StubBtcPrice::at("80000"),
+        };
+        let cfg = cfg_with_exit(ExitConfig {
+            tp_price: Decimal::from_str("0.85").unwrap(),
+            sl_price: Decimal::from_str("0.45").unwrap(),
+            poll: std::time::Duration::from_millis(50),
+        });
+        let outcome = run_window(&deps, &cfg, &fresh_ladder(), 1700000300).await;
+        // 10 shares × $1.00 auto-redeem = $10 proceeds (NOT $0)
+        assert!(matches!(outcome,
+            WindowOutcome::Won { ref proceeds_usd, ref cost_usd }
+                if *proceeds_usd == Decimal::from(10) && *cost_usd == Decimal::from(5)
+        ));
+        let kinds = emitter.kinds();
+        assert!(kinds.iter().any(|k| matches!(k, TraderEventKind::SellRejected { .. })),
+                "should emit SellRejected for diagnostic visibility");
+        assert!(kinds.iter().any(|k| matches!(k,
+            TraderEventKind::Alert { message } if message.contains("Auto-Redeem"))),
+                "alert should mention Auto-Redeem fallback");
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn maker_flag_routes_to_run_maker() {
         // Smoke: with cfg.maker=true and a stub fill, run_window dispatches
         // to maker.rs which posts a BuyLimitPosted event (taker path doesn't).
@@ -1162,6 +1240,7 @@ mod tests {
             }),
             exit_at_secs: None,
             maker: true,
+            tp_limit_sell: false,
             window_seconds: 300,
         };
         let _outcome = run_window(&deps, &cfg, &fresh_ladder(), chrono::Utc::now().timestamp()).await;
@@ -1178,6 +1257,7 @@ mod tests {
             exit: None,
             exit_at_secs: Some(exit_at_secs),
             maker: false,
+            tp_limit_sell: false,
             window_seconds: 300,
         }
     }

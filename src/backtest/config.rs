@@ -59,6 +59,16 @@ pub struct BacktestArgs {
     /// `real` = Real Polymarket trade history (v1.7.5; auto-fetches uncached).
     #[arg(long, value_enum, default_value = "bs")]
     pub oracle: OracleKind,
+    /// v1.12: when set, the runner exits at the first cap event — mirrors the
+    /// live trader's StopReason::CapReached behavior. Use to validate that a
+    /// specific live session is reproducible in backtest.
+    #[arg(long)]
+    pub stop_at_cap: bool,
+    /// v1.12: Unix epoch seconds — skip windows whose `window_ts` is before
+    /// this cutoff. Useful for replaying a specific live session that started
+    /// mid-day (date-level --start would include extra warmup trades).
+    #[arg(long)]
+    pub start_ts: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -109,6 +119,20 @@ pub enum DirectionSignal {
     /// Strategy 20: deterministic 50/50 random direction per window
     /// (seed mixed with window_ts → reproducible runs).
     Random { seed: u64 },
+    /// v1.12: RSI mean-reversion + EMA trend filter. RSI extreme triggers a
+    /// counter-trend bet, but only when the trend slope agrees (or is mild).
+    /// Skip when slope is strongly against the RSI signal — i.e., don't bet
+    /// UP into a sustained downtrend, don't bet DOWN into a sustained uptrend.
+    RsiWithTrendFilter {
+        period: usize,
+        oversold: f64,
+        overbought: f64,
+        ema_period: usize,
+        slope_lookback_mins: i64,
+        /// Absolute BTC $/min slope above which the trend is "strong";
+        /// counter-trend RSI signals at or beyond this slope get skipped.
+        slope_threshold: f64,
+    },
 }
 
 pub fn strategy_set() -> Vec<StrategyConfig> {
@@ -270,6 +294,28 @@ pub fn strategy_set() -> Vec<StrategyConfig> {
             ExitRule::TpOnlyOrHold { tp_price: dec!(0.87) },
             StakeRule::Martingale { base: dec!(5), max_step: 5 },
             DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        // v1.12: RSI Mart + TP=0.87 + EMA trend filter (slope threshold sweep)
+        with_signal("42_rsi_mart_tp87_ema_t2",
+            ExitRule::TpOnlyOrHold { tp_price: dec!(0.87) },
+            StakeRule::Martingale { base: dec!(5), max_step: 5 },
+            DirectionSignal::RsiWithTrendFilter {
+                period: 14, oversold: 30.0, overbought: 70.0,
+                ema_period: 50, slope_lookback_mins: 10, slope_threshold: 2.0,
+            }),
+        with_signal("43_rsi_mart_tp87_ema_t5",
+            ExitRule::TpOnlyOrHold { tp_price: dec!(0.87) },
+            StakeRule::Martingale { base: dec!(5), max_step: 5 },
+            DirectionSignal::RsiWithTrendFilter {
+                period: 14, oversold: 30.0, overbought: 70.0,
+                ema_period: 50, slope_lookback_mins: 10, slope_threshold: 5.0,
+            }),
+        with_signal("44_rsi_mart_tp87_ema_t10",
+            ExitRule::TpOnlyOrHold { tp_price: dec!(0.87) },
+            StakeRule::Martingale { base: dec!(5), max_step: 5 },
+            DirectionSignal::RsiWithTrendFilter {
+                period: 14, oversold: 30.0, overbought: 70.0,
+                ema_period: 50, slope_lookback_mins: 10, slope_threshold: 10.0,
+            }),
     ]
 }
 
@@ -308,7 +354,7 @@ mod tests {
         let mut names: Vec<&String> = s.iter().map(|c| &c.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 41);
+        assert_eq!(names.len(), 44);
     }
 
     #[test]
@@ -329,8 +375,8 @@ mod tests {
     #[test]
     fn filter_all_returns_everything() {
         let s = strategy_set();
-        assert_eq!(filter_strategies(&s, "all").len(), 41);
-        assert_eq!(filter_strategies(&s, "").len(), 41);
+        assert_eq!(filter_strategies(&s, "all").len(), 44);
+        assert_eq!(filter_strategies(&s, "").len(), 44);
     }
 
     #[test]
@@ -450,9 +496,9 @@ mod tests {
     }
 
     #[test]
-    fn strategy_set_has_fortyone_strategies() {
+    fn strategy_set_has_fortyfour_strategies() {
         let s = strategy_set();
-        assert_eq!(s.len(), 41);
+        assert_eq!(s.len(), 44);
     }
 
     #[test]

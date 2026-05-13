@@ -83,6 +83,35 @@ impl BinanceData {
         let rs = avg_gain / avg_loss;
         Some(100.0 - 100.0 / (1.0 + rs))
     }
+
+    /// EMA(period) over 1-min closes ending strictly before `ts`. Seeded with
+    /// the SMA of the first `period` candles, then standard EMA recurrence
+    /// (alpha = 2/(period+1)). Returns None when fewer than `period` candles
+    /// exist before `ts`.
+    pub fn ema_at(&self, ts: i64, period: usize) -> Option<f64> {
+        let end_idx = match self.candles.binary_search_by_key(&ts, |c| c.open_ts) {
+            Ok(i) => i,
+            Err(i) => i,
+        };
+        if end_idx < period { return None; }
+        let slice = &self.candles[..end_idx];
+        let alpha = 2.0 / (period as f64 + 1.0);
+        // Seed: SMA of first `period` candles.
+        let mut ema = slice[..period].iter().map(|c| c.close).sum::<f64>() / period as f64;
+        for c in &slice[period..] {
+            ema = alpha * c.close + (1.0 - alpha) * ema;
+        }
+        Some(ema)
+    }
+
+    /// EMA slope in $/minute, computed as (EMA(ts) − EMA(ts − lookback_mins·60))
+    /// / lookback_mins. Positive = uptrend, negative = downtrend. Returns None
+    /// if either EMA can't be computed.
+    pub fn ema_slope_at(&self, ts: i64, period: usize, lookback_mins: i64) -> Option<f64> {
+        let now = self.ema_at(ts, period)?;
+        let past = self.ema_at(ts - lookback_mins * 60, period)?;
+        Some((now - past) / lookback_mins as f64)
+    }
 }
 
 pub struct BinanceFetcher {
@@ -205,5 +234,51 @@ mod tests {
         // Verify sorting: index 0 should be 1000, index 1 should be 1060
         let p_at_1000 = d.price_at(1000).unwrap();
         assert!((p_at_1000 - 3.0).abs() < 0.01);
+    }
+
+    /// Build N candles starting at open_ts=0, 60s apart, close = linear ramp.
+    fn linear_ramp(n: usize, start: f64, step: f64) -> Vec<BtcCandle> {
+        (0..n).map(|i| c(i as i64 * 60, start + i as f64 * step, start + i as f64 * step)).collect()
+    }
+
+    #[test]
+    fn ema_at_flat_returns_close_price() {
+        let d = BinanceData::new(vec![c(0, 100.0, 100.0); 60].into_iter().enumerate()
+            .map(|(i, mut c)| { c.open_ts = i as i64 * 60; c }).collect());
+        let ema = d.ema_at(60 * 60, 50).unwrap();
+        assert!((ema - 100.0).abs() < 1e-6, "flat ema = price");
+    }
+
+    #[test]
+    fn ema_at_returns_none_when_insufficient_data() {
+        let d = BinanceData::new(linear_ramp(10, 100.0, 1.0));
+        assert!(d.ema_at(10 * 60, 50).is_none(), "10 candles < period 50");
+    }
+
+    #[test]
+    fn ema_slope_positive_on_rising_trend() {
+        // 100 candles rising $1/min. After 50 seed candles + 50 EMA recurrence,
+        // the EMA should also be rising ~$1/min when fully warmed up.
+        let d = BinanceData::new(linear_ramp(100, 80000.0, 1.0));
+        // ts = 100min (after last candle); lookback 10 min → slope ≈ +$1/min
+        let slope = d.ema_slope_at(100 * 60, 50, 10).unwrap();
+        assert!(slope > 0.5, "rising EMA should give positive slope, got {slope}");
+        assert!(slope < 1.5, "slope should be ~1.0, got {slope}");
+    }
+
+    #[test]
+    fn ema_slope_negative_on_falling_trend() {
+        let d = BinanceData::new(linear_ramp(100, 80000.0, -1.0));
+        let slope = d.ema_slope_at(100 * 60, 50, 10).unwrap();
+        assert!(slope < -0.5, "falling EMA should give negative slope, got {slope}");
+        assert!(slope > -1.5, "slope should be ~-1.0, got {slope}");
+    }
+
+    #[test]
+    fn ema_slope_near_zero_on_flat() {
+        let candles: Vec<BtcCandle> = (0..100).map(|i| c(i as i64 * 60, 80000.0, 80000.0)).collect();
+        let d = BinanceData::new(candles);
+        let slope = d.ema_slope_at(100 * 60, 50, 10).unwrap();
+        assert!(slope.abs() < 0.01, "flat market = zero slope, got {slope}");
     }
 }

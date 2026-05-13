@@ -330,6 +330,38 @@ poly-trader --direction up \
 
 **CLOB rounding fix.** `buy_fok` rounds `maker_amount` to 2 decimals (AwayFromZero) before submission; Polymarket rejects 3+ decimals with `"invalid amounts"`. SELL path already had this via `trunc_with_scale(2)`.
 
+### v1.12 — Fixed-stake + hybrid TP-limit-sell + retry backoff
+
+```bash
+poly-trader --direction up \
+  --base 5 --max-step 5 \
+  --exit-rule tp-sl --tp-price 0.87 \
+  --rsi-filter \
+  --fixed-stake \         # every BUY = base_shares; no Martingale; no cap
+  --tp-limit-sell         # taker BUY + limit SELL @ TP (no missed touches)
+```
+
+**`--fixed-stake`.** Disables Martingale doubling. Every BUY is `base_shares` shares (e.g., 5 shares ≈ $2.50 stake at $0.50 ask). Losses do not advance the ladder, so `StopReason::CapReached` is never triggered — the trader runs indefinitely. Matches backtest `StakeRule::Fixed` (strategies 6, 22-40). `LadderState.fixed_stake` is persisted to Redis; mid-session mode-switch is refused (you'd silently halve or 6× your risk profile).
+
+**`--tp-limit-sell`.** Hybrid mode: taker FoK BUY (guaranteed entry) + limit SELL posted at `--tp-price` immediately after the fill. The sell sits in the order book so any momentary bid touch ≥ TP gets filled — eliminates the miss-rate of the 5-second polling exit watcher. Falls back to market sell at t=window_close−30s if the limit hasn't filled. Mutually exclusive with `--maker`.
+
+**CLOB settlement-lag handling.** Polymarket's order-match engine returns BUY fills synchronously, but the position ledger updates asynchronously (~1-2s). Posting a SELL during that gap produces `"balance: 0"` rejections. v1.12.1 sleeps 2s after every BUY before attempting SELL. v1.12.2 retries with **2s / 4s / 8s exponential backoff** (each failure emits an `Alert` event), and the market-sell fallback uses the same pattern. Combined max wait 30s; window has 300s. When both SELL paths exhaust retries, the trader counts the win at `shares × $1.00` (Auto-Redeem will credit USDC on the winning side at gamma resolution).
+
+### Backtest validation tools (v1.12)
+
+```bash
+poly-backtest --start 2026-05-13 --end 2026-05-14 \
+  --oracle real \
+  --strategies 41_rsi_mart_tp87 \
+  --stop-at-cap \                # exit at first cap (matches live behavior)
+  --start-ts 1778638500 \        # filter windows to ≥ this unix epoch
+  --output report-live-match.html
+```
+
+**Use case.** Replay a live session in backtest to validate that observed outcomes match the model. `--stop-at-cap` makes the runner exit at the first `is_stopped()` ladder transition (mirrors `StopReason::CapReached`); without it, the runner resets the ladder and continues. `--start-ts` filters out warm-up windows when the live session started mid-day.
+
+**Finding from the 2026-05-13 validation.** With matched time range and stop-at-cap, the backtest produced **−$51.66 / 1 cap / max_consec_losses=5**, vs live **−$75.62 / 1 cap / max_consec_losses=5**. Structurally identical, but the backtest's `real` oracle is ~30% optimistic on PnL because it counts any recorded trade ≥ TP as a hit — live's 5s polling missed the brief touches. v1.12's `--tp-limit-sell` is the direct fix for that bias.
+
 ### Window length (v1.7.1, 5/15/60 min)
 
 Default `--window-minutes 5` reproduces v1.7 behavior. Polymarket also offers 15-minute and 60-minute BTC up/down markets:
@@ -575,6 +607,7 @@ Strategies 16-41 add an RSI(14) direction signal: `RSI<30 → UP`, `RSI>70 → D
 - TP grid 0.55→0.95: PnL plateau at $0.85-$0.91 (~$4.3k), peak $0.87 ($4,337). Tighter TP = higher win rate but smaller per-win profit.
 - SL grid 0.20→0.40 (on TP=$0.87): adding any SL **hurts** PnL by ~$3.6-3.9k. RSI<30 oversold windows V-shape recover too often to cut early.
 - Random baseline (-$820) confirms always-UP's +$2,444 in this period was bull-market luck, not direction edge — the RSI strategies' alpha (~$2k vs random) is the real signal.
+- **EMA trend filter (strategies 42-44, v1.12 experiment) HURTS PnL.** RSI Mart + TP=0.87 with EMA(50) slope-based "skip counter-trend" filter at threshold = $2/$5/$10/min produced $2,064 / $2,754 / $4,959 respectively — all below the no-filter baseline of $7,050. Win rate barely moved (60.6% → 59.1-59.8%), but the filter cuts winning windows along with losing ones. Lesson: 5-min binary markets reverse often enough during strong trends that betting against trend still has positive expectancy.
 
 ## License
 

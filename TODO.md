@@ -191,6 +191,34 @@ Spec / plan: `docs/superpowers/plans/2026-05-11-trader-hold-early-exit.md`.
 
 ---
 
+## v1.12 — Fixed-stake + hybrid TP-limit-sell + retry backoff + EMA filter (experimental) ✅ COMPLETE
+
+**Trader runtime — new modes:**
+- [x] `--fixed-stake` — every BUY is `base_shares` regardless of step; losses don't advance ladder; no cap possible. Matches backtest `StakeRule::Fixed`. `LadderState.fixed_stake: bool` persisted in Redis with serde-default for legacy JSON. Mid-session mode-switch refused (force `--reset`).
+- [x] `--tp-limit-sell` — hybrid: taker FoK BUY (guaranteed entry) + limit SELL posted at `--tp-price` immediately after fill. SELL sits in CLOB book so brief TP touches are captured without 5s poll lag. Falls back to market sell at t=window_close-30s. Mutually exclusive with `--maker`.
+
+**CLOB integration fixes:**
+- [x] `maker.rs sell_with_tp_sl` waits **2s** after BUY fill before posting SELL — Polymarket CLOB's position ledger doesn't update synchronously with the order match (race produced `"balance: 0"` rejections on every immediate SELL).
+- [x] **2s / 4s / 8s exponential-backoff retry** on TP limit post and on the market-sell fallback (each failure emits an `Alert` event for diagnostic visibility). Max combined wait 30s; window has 300s.
+- [x] `maker.rs market_sell_residual` auto-redeem fallback — when both SELL paths fail after retries, account for Auto-Redeem at gamma resolution: `proceeds_usd = shares × $1.00` (matches v1.11.12's `winner_sweep` fix).
+
+**Backtest additions (strategies 42-44, EMA trend filter experiment):**
+- [x] `BinanceData::ema_at(ts, period)` (SMA-seeded standard recurrence) + `ema_slope_at(ts, period, lookback)` returning $/min slope.
+- [x] `DirectionSignal::RsiWithTrendFilter { period, oversold, overbought, ema_period, slope_lookback_mins, slope_threshold }` — skip counter-trend RSI signals when EMA slope exceeds threshold.
+- [x] Strategies 42 (slope=$2/min), 43 ($5), 44 ($10) — RSI Mart + TP=0.87 + EMA gate.
+- [x] **Finding: filter HURTS PnL across all thresholds** (42=$2,064 / 43=$2,754 / 44=$4,959 vs baseline 41=$7,050). RSI mean-reversion has positive expectancy *during* trend days too (~60% win rate), and filtering them strips wins faster than it strips losses.
+
+**Backtest validation tools:**
+- [x] `--stop-at-cap` — runner exits at first cap event (mirrors live trader's `StopReason::CapReached`).
+- [x] `--start-ts <unix_ts>` — sub-day window filter to replay a specific live session.
+- [x] **Validation of 2026-05-13 live cap event**: same-time-range backtest produced 1 cap with max_consec_losses=5 (structurally identical to live), but PnL diverges $24 (`-$51.66` backtest vs `-$75.62` live) — backtest's `real` oracle is **systematically ~30% optimistic on TP-trigger detection** because it counts any recorded trade ≥ TP, whereas live's 5s polling can miss brief touches. v1.12 `--tp-limit-sell` is the direct fix.
+
+**TUI:**
+- [x] `Ctrl+L` / Shift+L — clears trader event log (handy when buffer is full of stale events from prior sessions).
+- [x] Status-bar hint updated: `q quit  r refresh  L clear-log`.
+
+---
+
 ## v1.11 — RSI direction filter + LIVE/DRY-RUN indicator + CLOB rounding fix ✅ COMPLETE
 
 **Trader runtime:**

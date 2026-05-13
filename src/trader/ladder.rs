@@ -64,6 +64,11 @@ pub struct LadderState {
     /// indicator. Defaults to false for legacy ladder JSON.
     #[serde(default)]
     pub dry_run: bool,
+    /// v1.12: when true, every BUY is `base_shares` regardless of step
+    /// (no Martingale doubling). Losses do not advance the ladder, so
+    /// `CapReached` is never triggered. Matches backtest StakeRule::Fixed.
+    #[serde(default)]
+    pub fixed_stake: bool,
 }
 
 fn default_window_minutes() -> u32 { 5 }
@@ -80,6 +85,7 @@ impl LadderState {
             stopped: None,
             window_minutes: 5,
             dry_run: false,
+            fixed_stake: false,
         }
     }
 
@@ -95,8 +101,18 @@ impl LadderState {
         self
     }
 
-    /// Share count to BUY at the current step. Martingale doubles each loss.
+    /// Builder-style override for `fixed_stake`. Use after `new()`.
+    pub fn with_fixed_stake(mut self, fixed_stake: bool) -> Self {
+        self.fixed_stake = fixed_stake;
+        self
+    }
+
+    /// Share count to BUY at the current step. Martingale doubles each loss
+    /// unless `fixed_stake` is set, in which case every BUY is `base_shares`.
     pub fn current_bet_shares(&self) -> u32 {
+        if self.fixed_stake {
+            return self.base_shares;
+        }
         let multiplier = 2_u32.pow((self.current_step - 1) as u32);
         self.base_shares.saturating_mul(multiplier)
     }
@@ -126,7 +142,11 @@ pub fn apply_outcome(
         WindowOutcome::Lost { spent_usd } => {
             next.realized_pnl_usd -= spent_usd;
             next.windows_lost += 1;
-            if state.current_step >= state.max_step {
+            // v1.12: Fixed-stake mode keeps the ladder pegged at step 1 — no
+            // doubling, no cap. Each loss is fully bounded by `base_shares`.
+            if state.fixed_stake {
+                // current_step already 1; nothing to do.
+            } else if state.current_step >= state.max_step {
                 next.stopped = Some(StopReason::CapReached);
             } else {
                 next.current_step += 1;
@@ -160,6 +180,7 @@ mod tests {
             stopped: None,
             window_minutes: 5,
             dry_run: false,
+            fixed_stake: false,
         }
     }
 
@@ -168,6 +189,30 @@ mod tests {
         for (step, expected) in [(1u8, 5u32), (2, 10), (3, 20), (4, 40), (5, 80)] {
             assert_eq!(fresh(step).current_bet_shares(), expected);
         }
+    }
+
+    #[test]
+    fn fixed_stake_keeps_bet_at_base_regardless_of_step() {
+        let mut s = fresh(1);
+        s.fixed_stake = true;
+        for step in 1u8..=5 {
+            s.current_step = step;
+            assert_eq!(s.current_bet_shares(), 5, "step {step} should still be 5 shares");
+        }
+    }
+
+    #[test]
+    fn fixed_stake_loss_does_not_advance_ladder_or_cap() {
+        let mut s = fresh(1);
+        s.fixed_stake = true;
+        // Apply 10 consecutive losses — should never cap.
+        for _ in 0..10 {
+            let lost = WindowOutcome::Lost { spent_usd: Decimal::from_str("2.50").unwrap() };
+            s = apply_outcome(&s, &lost, ts());
+        }
+        assert_eq!(s.current_step, 1, "fixed-stake stays at step 1");
+        assert!(s.stopped.is_none(), "fixed-stake never caps");
+        assert_eq!(s.windows_lost, 10);
     }
 
     #[test]

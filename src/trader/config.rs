@@ -64,6 +64,17 @@ pub struct TraderArgs {
     /// skip windows when liquidity is thin. Only valid with --exit-rule tp-sl.
     #[arg(long)]
     pub maker: bool,
+    /// v1.12: hybrid mode — taker FoK BUY (guaranteed entry) + limit SELL
+    /// posted at --tp-price (no missed brief touches). Falls back to market
+    /// sell at t=window_close-30s if TP limit not filled. Only valid with
+    /// --exit-rule tp-sl. Mutually exclusive with --maker.
+    #[arg(long)]
+    pub tp_limit_sell: bool,
+    /// v1.12: Fixed-stake mode — every BUY is `--base` shares regardless of
+    /// outcome. No Martingale doubling, no cap. Each loss is bounded by
+    /// `base × ask`. Matches backtest StakeRule::Fixed (strategies 6, 22-40).
+    #[arg(long)]
+    pub fixed_stake: bool,
     /// Trading window length in minutes. {5, 15, 60}. 5 has full backtest
     /// coverage; 15 has observed deeper liquidity but is unvalidated; 60 is
     /// unvalidated. Default 5.
@@ -140,6 +151,12 @@ impl TraderArgs {
         if self.maker && !matches!(self.exit_rule, ExitRuleArg::TpSl) {
             return Err(ConfigError::MakerRequiresTpSl);
         }
+        if self.tp_limit_sell && !matches!(self.exit_rule, ExitRuleArg::TpSl) {
+            return Err(ConfigError::TpLimitSellRequiresTpSl);
+        }
+        if self.tp_limit_sell && self.maker {
+            return Err(ConfigError::TpLimitSellConflictsWithMaker);
+        }
         Ok(())
     }
 }
@@ -174,6 +191,10 @@ pub enum ConfigError {
     RsiPeriodOutOfRange,
     #[error("--rsi-oversold and --rsi-overbought must satisfy 0 < oversold < overbought < 100")]
     RsiThresholdsInvalid,
+    #[error("--tp-limit-sell requires --exit-rule tp-sl")]
+    TpLimitSellRequiresTpSl,
+    #[error("--tp-limit-sell and --maker are mutually exclusive")]
+    TpLimitSellConflictsWithMaker,
 }
 
 #[cfg(test)]

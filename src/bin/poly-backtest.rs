@@ -9,7 +9,7 @@ use poly_tui::backtest::{
     },
     oracle::{estimate_sigma, BlackScholesOracle, NoisyBlackScholesOracle, RealTradeOracle, TokenPriceOracle},
     report::{render_html, ReportMeta},
-    runner::run_strategy,
+    runner::run_strategy_with_opts,
     stats::compute_stats,
 };
 use std::collections::HashMap;
@@ -134,13 +134,23 @@ async fn main() -> Result<()> {
 
     let all = strategy_set();
     let strategies = filter_strategies(&all, &args.strategies);
-    println!("[poly-backtest] running {} strategies on {} windows",
-        strategies.len(), loaded.windows.len());
+
+    // v1.12: optional sub-day filter to replay a specific live session.
+    let filtered_windows: Vec<_> = if let Some(start_ts) = args.start_ts {
+        loaded.windows.iter().filter(|w| w.window_ts >= start_ts).cloned().collect()
+    } else {
+        loaded.windows.clone()
+    };
+    println!("[poly-backtest] running {} strategies on {} windows{}",
+        strategies.len(), filtered_windows.len(),
+        if args.start_ts.is_some() {
+            format!(" (filtered from {})", loaded.windows.len())
+        } else { "".into() });
 
     let mut all_stats = Vec::new();
     for strategy in &strategies {
         println!("[poly-backtest]   running {}...", strategy.name);
-        let result = run_strategy(strategy, &loaded.windows, oracle.as_ref(), Some(btc_arc.as_ref()));
+        let result = run_strategy_with_opts(strategy, &filtered_windows, oracle.as_ref(), Some(btc_arc.as_ref()), args.stop_at_cap);
         let stats = compute_stats(&result);
         println!("[poly-backtest]     PnL=${:.2}  win_rate={:.1}%  cap_resets={}  max_step={}  max_consec_losses={}",
             stats.total_pnl_usd, stats.win_rate * 100.0, stats.cap_resets,

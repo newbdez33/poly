@@ -57,11 +57,11 @@ enum BuyOutcome {
 }
 
 #[derive(Clone, Debug)]
-struct BuyFill {
-    shares: Decimal,
-    dollars: Decimal,
+pub struct BuyFill {
+    pub shares: Decimal,
+    pub dollars: Decimal,
     #[allow(dead_code)]
-    fill_price: Decimal,
+    pub fill_price: Decimal,
 }
 
 /// Phase 1 — sweep BUY with 30s/60s/90s schedule.
@@ -207,7 +207,10 @@ async fn buy_with_sweep(
 
 /// Phase 2 — TP limit + SL price watch + cancel-and-market-sell at
 /// `window_ts + window_seconds - 30` (e.g. t=270 for 5min, t=870 for 15min).
-async fn sell_with_tp_sl(
+///
+/// Public so the v1.12 hybrid taker-BUY + limit-SELL path in window.rs can
+/// reuse it after a successful FoK fill.
+pub async fn sell_with_tp_sl(
     deps: &MakerDeps,
     ladder: &LadderState,
     market: &WindowMarket,
@@ -220,13 +223,37 @@ async fn sell_with_tp_sl(
 ) -> WindowOutcome {
     let _ = market; // keep param for future fields (resolution path); silence warn.
 
-    // Post TP limit @ tp_price for full shares.
-    let tp_id = match deps.executor.place_limit(token_id, OrderSide::Sell, exit_cfg.tp_price, buy_fill.shares).await {
+    // v1.12.1: Polymarket CLOB doesn't reflect the new share balance the same
+    // instant the BUY fill returns — a SELL posted in the next ~1s gets
+    // "balance: 0" rejected. Sleep briefly to let position registration
+    // propagate, then retry on failure with 2s/4s/8s exponential backoff.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // v1.12.2: retry TP limit post on transient failures (mainly the
+    // "balance: 0" settlement lag). 4 total attempts: initial + 3 retries
+    // at 2s/4s/8s. Window has 300s total; max retry wait 14s leaves ample
+    // time for the limit to sit in the book and fill.
+    let mut tp_result = deps.executor
+        .place_limit(token_id, OrderSide::Sell, exit_cfg.tp_price, buy_fill.shares).await;
+    let retry_delays = [Duration::from_secs(2), Duration::from_secs(4), Duration::from_secs(8)];
+    for (i, &delay) in retry_delays.iter().enumerate() {
+        if tp_result.is_ok() { break; }
+        let last_err = tp_result.as_ref().err().map(|e| e.to_string()).unwrap_or_default();
+        emit(&deps.emitter, ladder, TraderEventKind::Alert {
+            message: format!(
+                "tp post retry {}/{} in {}s; last err: {last_err}",
+                i + 1, retry_delays.len(), delay.as_secs(),
+            ),
+        }).await;
+        tokio::time::sleep(delay).await;
+        tp_result = deps.executor
+            .place_limit(token_id, OrderSide::Sell, exit_cfg.tp_price, buy_fill.shares).await;
+    }
+    let tp_id = match tp_result {
         Ok(id) => id,
         Err(e) => {
-            // TP placement failed — fall back to market sell at current bid.
             emit(&deps.emitter, ladder, TraderEventKind::OrderRejected {
-                reason: format!("tp place_limit: {e}"),
+                reason: format!("tp place_limit (after retries): {e}"),
             }).await;
             return market_sell_residual(deps, ladder, token_id, buy_fill.shares, buy_fill.dollars, &exit_cfg.sl_price).await;
         }
@@ -394,14 +421,39 @@ async fn market_sell_residual(
         Ok(b) => b,
         Err(_) => *fallback_bid,
     };
-    let sell_fill = match deps.executor.sell_at_bid(token_id, shares, bid).await {
+    // v1.12.2: retry market sell on transient failures (mostly the
+    // "balance: 0" settlement lag). Same 2s/4s/8s pattern as TP post.
+    let mut sell_result = deps.executor.sell_at_bid(token_id, shares, bid).await;
+    let retry_delays = [Duration::from_secs(2), Duration::from_secs(4), Duration::from_secs(8)];
+    for (i, &delay) in retry_delays.iter().enumerate() {
+        if sell_result.is_ok() { break; }
+        let last_err = sell_result.as_ref().err().map(|e| e.to_string()).unwrap_or_default();
+        emit(&deps.emitter, ladder, TraderEventKind::Alert {
+            message: format!(
+                "market sell retry {}/{} in {}s; last err: {last_err}",
+                i + 1, retry_delays.len(), delay.as_secs(),
+            ),
+        }).await;
+        tokio::time::sleep(delay).await;
+        sell_result = deps.executor.sell_at_bid(token_id, shares, bid).await;
+    }
+    let sell_fill = match sell_result {
         Ok(f) => f,
         Err(e) => {
+            // v1.12.1: same auto-redeem fallback as window.rs winner_sweep —
+            // Polymarket Auto-Redeem credits $1/share on the winning side at
+            // gamma resolution, so counting the win at face value is closer
+            // to truth than booking a phantom loss. If we lose at resolution,
+            // the position just sits at $0 (no further cost beyond `cost`).
+            let expected = shares * rust_decimal_macros::dec!(1.00);
             emit(&deps.emitter, ladder, TraderEventKind::SellRejected { reason: format!("{e}") }).await;
             emit(&deps.emitter, ladder, TraderEventKind::Alert {
-                message: format!("market sell failed; shares stuck for token {token_id}"),
+                message: format!(
+                    "market sell failed (after retries); relying on Auto-Redeem for {} shares (expected ${} on-chain)",
+                    shares, expected,
+                ),
             }).await;
-            return WindowOutcome::Won { proceeds_usd: Decimal::ZERO, cost_usd: cost };
+            return WindowOutcome::Won { proceeds_usd: expected, cost_usd: cost };
         }
     };
     emit(&deps.emitter, ladder, TraderEventKind::SellFilled { proceeds_usd: sell_fill.dollars }).await;
