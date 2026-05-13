@@ -107,6 +107,13 @@ impl OrderExecutor for ClobOrderExecutor {
         let tid = U256::from_str(token_id)
             .map_err(|e| ExecError::Decode(format!("invalid token_id '{token_id}': {e}")))?;
 
+        // v1.11.11: Polymarket CLOB requires maker_amount with ≤2 decimals.
+        // Round UP (ceiling) so we never underpay for the requested share count;
+        // the FoK response returns the exact making_amount the exchange consumed.
+        let dollars = dollars.round_dp_with_strategy(
+            2,
+            rust_decimal::RoundingStrategy::AwayFromZero,
+        );
         let amount = Amount::usdc(dollars)
             .map_err(|e| ExecError::Decode(format!("invalid USDC amount {dollars}: {e}")))?;
 

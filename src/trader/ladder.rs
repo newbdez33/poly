@@ -21,6 +21,12 @@ pub enum SkipReason {
     ResolutionTimeout,
     GammaApiUnavailable,
     MarketNotFound,
+    /// v1.11: RSI in neutral zone (between oversold and overbought thresholds);
+    /// strategy 33 skips these windows. `rsi` is the computed RSI × 100 (0-100).
+    RsiNeutralFilter { rsi: Decimal },
+    /// v1.11: Binance API failed to return candles for RSI computation —
+    /// trader skips the window rather than blindly trading.
+    RsiFetchFailed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +59,11 @@ pub struct LadderState {
     /// omits this field; serde(default) restores 5min behavior on legacy state.
     #[serde(default = "default_window_minutes")]
     pub window_minutes: u32,
+    /// v1.11.10: true when the trader is running in --dry-run mode (no real
+    /// orders). Surfaced to the TUI so the status bar can show a LIVE/DRY-RUN
+    /// indicator. Defaults to false for legacy ladder JSON.
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 fn default_window_minutes() -> u32 { 5 }
@@ -68,12 +79,19 @@ impl LadderState {
             windows_won: 0, windows_lost: 0, windows_skipped: 0,
             stopped: None,
             window_minutes: 5,
+            dry_run: false,
         }
     }
 
     /// Builder-style override for `window_minutes`. Use after `new()`.
     pub fn with_window_minutes(mut self, mins: u32) -> Self {
         self.window_minutes = mins;
+        self
+    }
+
+    /// Builder-style override for `dry_run`. Use after `new()`.
+    pub fn with_dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = dry_run;
         self
     }
 
@@ -141,6 +159,7 @@ mod tests {
             windows_won: 0, windows_lost: 0, windows_skipped: 0,
             stopped: None,
             window_minutes: 5,
+            dry_run: false,
         }
     }
 

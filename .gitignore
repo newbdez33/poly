@@ -13,3 +13,13 @@ Thumbs.db
 .vscode/
 *.swp
 *.snap.new
+
+# Local agent state
+.claude/
+.playwright-mcp/
+tmp/
+
+# Backtest HTML reports (build artifacts, ~10MB each)
+backtest-report*.html
+bs-smoke.html
+report-*.html

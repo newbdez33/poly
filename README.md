@@ -304,6 +304,32 @@ Replaces the v1.1 "hold + market-sell winner" flow with a Chainlink-driven outco
 
 Spec / commit: `209e859`.
 
+### v1.11 — RSI direction filter + LIVE/DRY-RUN indicator + CLOB rounding fix
+
+```bash
+poly-trader --direction up \
+  --base 5 --max-step 5 \
+  --exit-rule tp-sl --tp-price 0.87 \
+  --rsi-filter
+  # (omit --sl-price for TP-only behavior; --dry-run for sim)
+```
+
+**RSI gate.** Before each window the trader fetches the last 15 BTC 1-min closes from Binance and computes Wilder RSI(14):
+
+| RSI | Action |
+|---|---|
+| < `--rsi-oversold` (30) | bet **UP** (mean reversion: BTC sold off) |
+| > `--rsi-overbought` (70) | bet **DOWN** (BTC ran up) |
+| neutral zone | **SKIP** (no trade) |
+
+`--direction` becomes a fallback used only on Binance fetch failure; the live direction is decided per window. Matches the `33_rsi_fixed_tp87` and `41_rsi_mart_tp87` backtest variants exactly.
+
+**TP-only via tp-sl mode.** Omit `--sl-price` and the trader uses an effective $0.001 floor (never triggers) for clean take-profit behavior.
+
+**Safety indicator.** TUI status bar prefixes the Trader line with **`LIVE`** (white-on-red) for real-money mode or **`DRY-RUN`** (yellow-on-black) for simulation. Persisted on `LadderState.dry_run` so resumes can't silently flip modes — mid-session mode switch errors out and demands `--reset`.
+
+**CLOB rounding fix.** `buy_fok` rounds `maker_amount` to 2 decimals (AwayFromZero) before submission; Polymarket rejects 3+ decimals with `"invalid amounts"`. SELL path already had this via `trunc_with_scale(2)`.
+
 ### Window length (v1.7.1, 5/15/60 min)
 
 Default `--window-minutes 5` reproduces v1.7 behavior. Polymarket also offers 15-minute and 60-minute BTC up/down markets:
@@ -530,6 +556,25 @@ poly-backtest --start 2026-04-09 --end 2026-05-09 --oracle real \
 Both candidates exit BEFORE window resolution (t=300s) to avoid post-resolution redemption (which currently requires MATIC the EOA doesn't have). Pre-trade fallback is a flat 0.5 (no forward-look bias).
 
 `strategy_set()` now returns 13 strategies (1-11 unchanged + 12 + 13). `--oracle bs` (default) reproduces v1.7.2 numbers byte-identically.
+
+### RSI strategies (v1.11)
+
+Strategies 16-41 add an RSI(14) direction signal: `RSI<30 → UP`, `RSI>70 → DOWN`, neutral zone → SKIP. Combined with TP/SL exit rules and stake (Fixed or Martingale), they form the v1.11 strategy family. `strategy_set()` now returns 41 strategies.
+
+**Backtest headline (real oracle, 2026-02-10 → 2026-05-10, 22,561 windows):**
+
+| Strategy | PnL | Win rate | Cap resets | Notes |
+|---|---:|---:|---:|---|
+| 17 RSI Mart, hold to resolution | $3,546 | 52.3% | 62 | original RSI Mart |
+| **33 RSI Fixed, TP=$0.87** | **$4,337** | **60.6%** | 44 | safest +EV (single trade max −$5) |
+| **41 RSI Mart, TP=$0.87** | **$7,050** | **60.6%** | 44 | highest PnL; max sequence loss −$155 at step 5 |
+| 19 always_down baseline | $718 | 49.9% | 162 | direction baseline (no RSI) |
+| 20 random_direction baseline | −$820 | 50.1% | 173 | no-alpha control (SplitMix64-seeded) |
+
+**Sweep findings:**
+- TP grid 0.55→0.95: PnL plateau at $0.85-$0.91 (~$4.3k), peak $0.87 ($4,337). Tighter TP = higher win rate but smaller per-win profit.
+- SL grid 0.20→0.40 (on TP=$0.87): adding any SL **hurts** PnL by ~$3.6-3.9k. RSI<30 oversold windows V-shape recover too often to cut early.
+- Random baseline (-$820) confirms always-UP's +$2,444 in this period was bull-market luck, not direction edge — the RSI strategies' alpha (~$2k vs random) is the real signal.
 
 ## License
 

@@ -44,7 +44,7 @@ async fn end_to_end_one_day() {
     let strategies = strategy_set();
     let mut all_stats = Vec::new();
     for s in &strategies {
-        let result = run_strategy(s, &loaded.windows, &oracle);
+        let result = run_strategy(s, &loaded.windows, &oracle, None);
         all_stats.push(compute_stats(&result));
     }
     assert_eq!(all_stats.len(), 6);

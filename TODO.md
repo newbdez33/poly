@@ -191,6 +191,48 @@ Spec / plan: `docs/superpowers/plans/2026-05-11-trader-hold-early-exit.md`.
 
 ---
 
+## v1.11 — RSI direction filter + LIVE/DRY-RUN indicator + CLOB rounding fix ✅ COMPLETE
+
+**Trader runtime:**
+- [x] `src/trader/rsi_gate.rs` — `LiveBinanceFetcher` + Wilder RSI(period) + `RsiGate::decide` (8/8 tests)
+- [x] CLI: `--rsi-filter --rsi-period 14 --rsi-oversold 30 --rsi-overbought 70`
+- [x] `RsiGatedExec` wrapper for `WindowExecutor` — per-window direction override or skip
+- [x] `SkipReason::RsiNeutralFilter { rsi }` + `RsiFetchFailed` variants
+- [x] TP-only support: `--exit-rule tp-sl` no longer requires `--sl-price` (default $0.001 floor)
+- [x] **CLOB rounding fix**: `buy_fok` rounds `maker_amount` to 2dp via `AwayFromZero` strategy (CLOB rejects 3+ decimals)
+
+**Safety:**
+- [x] `LadderState.dry_run: bool` (serde-default for legacy JSON)
+- [x] Trader writes `dry_run` from CLI into ladder, persisted in Redis
+- [x] Mid-session mode-switch refused (resume with different `--dry-run` errors out)
+- [x] TUI status bar: **LIVE** (white-on-red) / **DRY-RUN** (yellow-on-black) prefix on Trader line
+- [x] LadderUpdated event in TUI now shows outcome detail (`WON +$X`, `LOST -$X`, `SKIP RSI=Y`)
+
+**Backtest strategies added (22-41):**
+- 22-25, 32-35: RSI Fixed-stake + TP grid (0.55→0.95 step 0.05 + ultra-fine 0.83/0.85/0.87/0.89/0.91)
+- 36-40: RSI Fixed + TP=0.87 + SL grid (0.20→0.40) — discovered SL **hurts** alpha
+- 19: always-DOWN baseline; 20: deterministic-random baseline (SplitMix64 hash)
+- 41: hybrid **RSI Mart + TP=$0.87** — backtest +$7,050 / 3mo (real oracle)
+
+**Headline results (real oracle, 3mo, 22,561 windows):**
+
+| Strategy | PnL | Win rate | Cap resets |
+|---|---:|---:|---:|
+| 17 RSI Mart (hold) | $3,546 | 52.3% | 62 |
+| 33 RSI Fixed + TP=0.87 | $4,337 | 60.6% | 44 |
+| 41 RSI Mart + TP=0.87 | **$7,050** | **60.6%** | 44 |
+
+**Key insights:**
+- TP=$0.85-0.91 is a wide PnL plateau; pick $0.87 for liquidity
+- SL grid (0.20-0.40) reduced win rate 60.6% → 44-50% — RSI<30 windows V-shape recover too often to cut early
+- Hybrid 41 = TP's win-rate gain × Mart's recovery leverage
+
+**Validation:**
+- [x] 7h dry-run of strategy 41 → +$13.92, 8 wins / 6 losses (57.1%), 1 step-4 recovery
+- [x] Live trader hit "invalid amounts" CLOB rejection on first real order → diagnosed + fixed (3-dp maker amount)
+
+---
+
 ## v1.10 — Strategies 8/9 (TP+SL) revisited ⏳ TODO (unblocked)
 
 v1.7.5 backtest showed `8_tp85_sl35` (+$1,696) and `9_tp85_sl30` (+$1,824) outperform strategy 13 (+$1,505) on real data. Originally blocked by redeem path requirement; **Auto-Redeem (2026-05-12) removes the blocker** — winning resolutions auto-pay to USDC without operator action.

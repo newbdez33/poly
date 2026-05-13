@@ -90,6 +90,25 @@ pub struct StrategyConfig {
     /// previous window's actual winner (momentum strategy). First window
     /// falls back to the fixed `direction` field.
     pub follow_previous_winner: bool,
+    /// v1.11: per-window direction signal. If `None`, the runner uses
+    /// `direction` (or `follow_previous_winner` if set). If Some, overrides
+    /// both based on RSI or other technical indicators.
+    pub direction_signal: Option<DirectionSignal>,
+}
+
+/// v1.11: technical-indicator-based per-window direction rules.
+#[derive(Clone, Debug)]
+pub enum DirectionSignal {
+    /// Strategy A (16): RSI<oversold→UP, RSI>overbought→DOWN, else fallback.
+    RsiDirection { period: usize, oversold: f64, overbought: f64 },
+    /// Strategy B (17): RSI<oversold→UP, RSI>overbought→DOWN, else SKIP window.
+    RsiFilterSkipNeutral { period: usize, oversold: f64, overbought: f64 },
+    /// Strategy C (18): RSI extreme zone → mean-reversion direction;
+    /// neutral zone → anti-follow-previous-winner (bet against last winner).
+    RsiPlusAntiFollow { period: usize, oversold: f64, overbought: f64 },
+    /// Strategy 20: deterministic 50/50 random direction per window
+    /// (seed mixed with window_ts → reproducible runs).
+    Random { seed: u64 },
 }
 
 pub fn strategy_set() -> Vec<StrategyConfig> {
@@ -102,9 +121,14 @@ pub fn strategy_set() -> Vec<StrategyConfig> {
         stake,
         exit,
         follow_previous_winner: false,
+        direction_signal: None,
     };
     let follow_prev = |name: &str, exit: ExitRule, stake: StakeRule| StrategyConfig {
         follow_previous_winner: true,
+        ..common(name, exit, stake)
+    };
+    let with_signal = |name: &str, exit: ExitRule, stake: StakeRule, signal: DirectionSignal| StrategyConfig {
+        direction_signal: Some(signal),
         ..common(name, exit, stake)
     };
     vec![
@@ -132,6 +156,120 @@ pub fn strategy_set() -> Vec<StrategyConfig> {
         follow_prev("15_hold_early_exit_270_followprev",
             ExitRule::FixedTime { seconds: 270 },
             mart()),
+        // v1.11: RSI-based direction strategies (A, B, C)
+        with_signal("16_hold_rsi_direction",
+            ExitRule::HoldToResolution,
+            mart(),
+            DirectionSignal::RsiDirection { period: 14, oversold: 30.0, overbought: 70.0 }),
+        with_signal("17_hold_rsi_filter",
+            ExitRule::HoldToResolution,
+            mart(),
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        with_signal("18_hold_rsi_anti_follow",
+            ExitRule::HoldToResolution,
+            mart(),
+            DirectionSignal::RsiPlusAntiFollow { period: 14, oversold: 30.0, overbought: 70.0 }),
+        // v1.11.1: symmetric baseline — always DOWN
+        StrategyConfig {
+            direction: Direction::Down,
+            ..common("19_hold_always_down", ExitRule::HoldToResolution, mart())
+        },
+        // v1.11.2: random-direction baseline (deterministic via seed+window_ts hash)
+        with_signal("20_hold_random_direction",
+            ExitRule::HoldToResolution,
+            mart(),
+            DirectionSignal::Random { seed: 42 }),
+        // v1.11.3: strategy 17 with max_step=7 (covers max_consec_losses=9 better)
+        with_signal("21_hold_rsi_filter_max7",
+            ExitRule::HoldToResolution,
+            StakeRule::Martingale { base: dec!(5), max_step: 7 },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        // v1.11.4: strategy 17 with fixed $5 (no martingale) — pure RSI alpha
+        with_signal("22_hold_rsi_filter_fixed",
+            ExitRule::HoldToResolution,
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        // v1.11.5: strategy 22 + TP-only SELL limit order (avoid end-of-window reversal)
+        with_signal("23_rsi_fixed_tp65",
+            ExitRule::TpOnlyOrHold { tp_price: dec!(0.65) },
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        with_signal("24_rsi_fixed_tp75",
+            ExitRule::TpOnlyOrHold { tp_price: dec!(0.75) },
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        with_signal("25_rsi_fixed_tp85",
+            ExitRule::TpOnlyOrHold { tp_price: dec!(0.85) },
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        // v1.11.6: TP grid search (0.55 → 0.95 step 0.05, completing the sweep)
+        with_signal("26_rsi_fixed_tp55",
+            ExitRule::TpOnlyOrHold { tp_price: dec!(0.55) },
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        with_signal("27_rsi_fixed_tp60",
+            ExitRule::TpOnlyOrHold { tp_price: dec!(0.60) },
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        with_signal("28_rsi_fixed_tp70",
+            ExitRule::TpOnlyOrHold { tp_price: dec!(0.70) },
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        with_signal("29_rsi_fixed_tp80",
+            ExitRule::TpOnlyOrHold { tp_price: dec!(0.80) },
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        with_signal("30_rsi_fixed_tp90",
+            ExitRule::TpOnlyOrHold { tp_price: dec!(0.90) },
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        with_signal("31_rsi_fixed_tp95",
+            ExitRule::TpOnlyOrHold { tp_price: dec!(0.95) },
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        // v1.11.7: ultra-fine TP grid around the $0.85–$0.90 plateau
+        with_signal("32_rsi_fixed_tp83",
+            ExitRule::TpOnlyOrHold { tp_price: dec!(0.83) },
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        with_signal("33_rsi_fixed_tp87",
+            ExitRule::TpOnlyOrHold { tp_price: dec!(0.87) },
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        with_signal("34_rsi_fixed_tp89",
+            ExitRule::TpOnlyOrHold { tp_price: dec!(0.89) },
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        with_signal("35_rsi_fixed_tp91",
+            ExitRule::TpOnlyOrHold { tp_price: dec!(0.91) },
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        // v1.11.8: SL grid (TP=0.87 fixed, SL sweep)
+        with_signal("36_rsi_tp87_sl20",
+            ExitRule::TpSlOrHold { tp_price: dec!(0.87), sl_price: dec!(0.20) },
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        with_signal("37_rsi_tp87_sl25",
+            ExitRule::TpSlOrHold { tp_price: dec!(0.87), sl_price: dec!(0.25) },
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        with_signal("38_rsi_tp87_sl30",
+            ExitRule::TpSlOrHold { tp_price: dec!(0.87), sl_price: dec!(0.30) },
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        with_signal("39_rsi_tp87_sl35",
+            ExitRule::TpSlOrHold { tp_price: dec!(0.87), sl_price: dec!(0.35) },
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        with_signal("40_rsi_tp87_sl40",
+            ExitRule::TpSlOrHold { tp_price: dec!(0.87), sl_price: dec!(0.40) },
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        // v1.11.9: hybrid — RSI Mart + TP=0.87 (mirrors the dry-run we accidentally ran)
+        with_signal("41_rsi_mart_tp87",
+            ExitRule::TpOnlyOrHold { tp_price: dec!(0.87) },
+            StakeRule::Martingale { base: dec!(5), max_step: 5 },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
     ]
 }
 
@@ -170,7 +308,7 @@ mod tests {
         let mut names: Vec<&String> = s.iter().map(|c| &c.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 15);
+        assert_eq!(names.len(), 41);
     }
 
     #[test]
@@ -191,8 +329,8 @@ mod tests {
     #[test]
     fn filter_all_returns_everything() {
         let s = strategy_set();
-        assert_eq!(filter_strategies(&s, "all").len(), 15);
-        assert_eq!(filter_strategies(&s, "").len(), 15);
+        assert_eq!(filter_strategies(&s, "all").len(), 41);
+        assert_eq!(filter_strategies(&s, "").len(), 41);
     }
 
     #[test]
@@ -312,9 +450,9 @@ mod tests {
     }
 
     #[test]
-    fn strategy_set_has_fifteen_strategies() {
+    fn strategy_set_has_fortyone_strategies() {
         let s = strategy_set();
-        assert_eq!(s.len(), 15);
+        assert_eq!(s.len(), 41);
     }
 
     #[test]

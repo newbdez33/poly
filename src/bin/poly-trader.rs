@@ -17,14 +17,16 @@ use poly_tui::trader::errors::StateError;
 use poly_tui::trader::event::TraderEventEmitter;
 use poly_tui::trader::executor::OrderExecutor;
 use poly_tui::trader::exit_watcher::ExitConfig;
-use poly_tui::trader::ladder::{Direction, LadderState};
+use poly_tui::trader::ladder::{Direction, LadderState, SkipReason, WindowOutcome};
 use poly_tui::trader::market::MarketDiscovery;
 use poly_tui::trader::order_events::{OrderEventStream, PolymarketPollOrderEvents};
 use poly_tui::trader::price::MidwindowPriceFetcher;
 use poly_tui::trader::resolver::{PolymarketResolver, WindowResolver};
+use poly_tui::trader::rsi_gate::{LiveBinanceFetcher, RsiDecision, RsiGate};
 use poly_tui::trader::scheduler::{run, SchedulerConfig, SchedulerDeps, WindowExecutor};
 use poly_tui::trader::state::TraderStateStore;
 use poly_tui::trader::window::{run_window, WindowConfig, WindowDeps};
+use rust_decimal_macros::dec;
 use rust_decimal::prelude::ToPrimitive;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -171,7 +173,9 @@ async fn main() -> Result<()> {
         ExitRuleArg::HoldEarlyExit => None,
         ExitRuleArg::TpSl => Some(ExitConfig {
             tp_price: args.tp_price.expect("validated: --tp-price required"),
-            sl_price: args.sl_price.expect("validated: --sl-price required"),
+            // v1.11: SL is optional — when omitted, use $0.001 floor (never triggers)
+            // for TP-only behavior.
+            sl_price: args.sl_price.unwrap_or_else(|| dec!(0.001)),
             poll: std::time::Duration::from_secs(args.poll_secs as u64),
         }),
     };
@@ -183,10 +187,28 @@ async fn main() -> Result<()> {
         maker: args.maker,
         window_seconds,
     };
-    let window_exec: Arc<dyn WindowExecutor> = Arc::new(BoundWindowExec {
+    let base_exec: Arc<dyn WindowExecutor> = Arc::new(BoundWindowExec {
         deps: window_deps.clone(),
         cfg: window_cfg,
     });
+    let window_exec: Arc<dyn WindowExecutor> = if args.rsi_filter {
+        tracing::info!(
+            "RSI filter enabled: period={} oversold={} overbought={}",
+            args.rsi_period, args.rsi_oversold, args.rsi_overbought,
+        );
+        let gate = RsiGate::new(
+            args.rsi_period,
+            args.rsi_oversold,
+            args.rsi_overbought,
+            Box::new(LiveBinanceFetcher::new()),
+        );
+        Arc::new(RsiGatedExec {
+            inner: base_exec,
+            gate: Arc::new(gate),
+        })
+    } else {
+        base_exec
+    };
 
     let sched_deps = SchedulerDeps {
         window_exec,
@@ -218,6 +240,48 @@ impl WindowExecutor for BoundWindowExec {
     }
 }
 
+/// v1.11: RSI-gating wrapper for WindowExecutor. Before each window, fetches
+/// Binance candles + computes RSI(period). If RSI is in the neutral zone the
+/// window is skipped without trading; otherwise the inner executor is invoked
+/// with the ladder's direction overridden to UP (oversold) or DOWN (overbought).
+struct RsiGatedExec {
+    inner: Arc<dyn WindowExecutor>,
+    gate: Arc<RsiGate>,
+}
+
+#[async_trait::async_trait]
+impl WindowExecutor for RsiGatedExec {
+    async fn execute(&self, ladder: &LadderState, window_ts: i64) -> WindowOutcome {
+        let decision = self.gate.decide(window_ts).await;
+        match decision {
+            RsiDecision::SkipNeutral { rsi } => {
+                tracing::info!("rsi-gate: skip neutral RSI={:.2} window={}", rsi, window_ts);
+                let rsi_dec = decision.rsi_decimal().unwrap_or_default();
+                WindowOutcome::Skipped {
+                    reason: SkipReason::RsiNeutralFilter { rsi: rsi_dec },
+                }
+            }
+            RsiDecision::FetchFailed => {
+                tracing::warn!("rsi-gate: skip (fetch failed) window={}", window_ts);
+                WindowOutcome::Skipped { reason: SkipReason::RsiFetchFailed }
+            }
+            RsiDecision::Trade { direction, rsi } => {
+                tracing::info!(
+                    "rsi-gate: trade {:?} RSI={:.2} window={}",
+                    direction, rsi, window_ts,
+                );
+                if direction == ladder.direction {
+                    self.inner.execute(ladder, window_ts).await
+                } else {
+                    let mut overridden = ladder.clone();
+                    overridden.direction = direction;
+                    self.inner.execute(&overridden, window_ts).await
+                }
+            }
+        }
+    }
+}
+
 
 async fn restore_or_init(
     store: &dyn TraderStateStore,
@@ -232,6 +296,15 @@ async fn restore_or_init(
                     "saved ladder is for {}min windows; trader configured for {}min. \
                      Pass --reset to start a fresh session.",
                     s.window_minutes, args.window_minutes
+                );
+            }
+            // v1.11.10: refuse to silently switch between dry-run and live mode
+            // mid-session — that masks accidental real-money trading.
+            if s.dry_run != args.dry_run {
+                anyhow::bail!(
+                    "saved ladder is dry_run={}; trader invoked with dry_run={}. \
+                     Pass --reset to start a fresh session in the new mode.",
+                    s.dry_run, args.dry_run
                 );
             }
             tracing::info!("resuming ladder: step={} pnl={} window_minutes={}",
@@ -249,7 +322,8 @@ async fn restore_or_init(
             // User-facing rename to --base-shares is a follow-up task.
             let base_shares = args.base.to_u32().unwrap_or(5);
             Ok(LadderState::new(direction, base_shares, args.max_step, chrono::Utc::now())
-                .with_window_minutes(args.window_minutes))
+                .with_window_minutes(args.window_minutes)
+                .with_dry_run(args.dry_run))
         }
     }
 }

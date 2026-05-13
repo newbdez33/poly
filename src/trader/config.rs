@@ -69,6 +69,18 @@ pub struct TraderArgs {
     /// unvalidated. Default 5.
     #[arg(long, default_value = "5")]
     pub window_minutes: u32,
+    /// v1.11: enable RSI(period) direction filter (strategy 33).
+    /// Before each window, fetch Binance 1-min closes, compute RSI:
+    ///   RSI < oversold → force UP, RSI > overbought → force DOWN,
+    ///   otherwise → skip window. Overrides --direction per window.
+    #[arg(long)]
+    pub rsi_filter: bool,
+    #[arg(long, default_value = "14")]
+    pub rsi_period: usize,
+    #[arg(long, default_value = "30.0")]
+    pub rsi_oversold: f64,
+    #[arg(long, default_value = "70.0")]
+    pub rsi_overbought: f64,
 }
 
 impl TraderArgs {
@@ -87,16 +99,28 @@ impl TraderArgs {
             return Err(ConfigError::InvalidPollSecs);
         }
         if matches!(self.exit_rule, ExitRuleArg::TpSl) {
-            let (tp, sl) = match (self.tp_price, self.sl_price) {
-                (Some(tp), Some(sl)) => (tp, sl),
-                _ => return Err(ConfigError::ExitRuleMissingThresholds),
-            };
-            if tp <= Decimal::ZERO || tp >= Decimal::ONE
-               || sl <= Decimal::ZERO || sl >= Decimal::ONE {
+            // v1.11: SL is optional — when omitted, an effective floor of $0.001
+            // is used (never triggers), giving us TP-only behavior.
+            let tp = self.tp_price.ok_or(ConfigError::ExitRuleMissingThresholds)?;
+            if tp <= Decimal::ZERO || tp >= Decimal::ONE {
                 return Err(ConfigError::ExitRuleInvalidThreshold);
             }
-            if tp <= sl {
-                return Err(ConfigError::ExitRuleInvertedThresholds);
+            if let Some(sl) = self.sl_price {
+                if sl <= Decimal::ZERO || sl >= Decimal::ONE {
+                    return Err(ConfigError::ExitRuleInvalidThreshold);
+                }
+                if tp <= sl {
+                    return Err(ConfigError::ExitRuleInvertedThresholds);
+                }
+            }
+        }
+        if self.rsi_filter {
+            if self.rsi_period < 2 || self.rsi_period > 60 {
+                return Err(ConfigError::RsiPeriodOutOfRange);
+            }
+            if self.rsi_oversold <= 0.0 || self.rsi_oversold >= self.rsi_overbought
+               || self.rsi_overbought >= 100.0 {
+                return Err(ConfigError::RsiThresholdsInvalid);
             }
         }
         let window_seconds = (self.window_minutes as u32) * 60;
@@ -146,6 +170,10 @@ pub enum ConfigError {
     ExitAtSecsWrongMode,
     #[error("--exit-at-secs must be in 1..=(window-seconds - 30)")]
     ExitAtSecsOutOfRange,
+    #[error("--rsi-period must be in 2..=60")]
+    RsiPeriodOutOfRange,
+    #[error("--rsi-oversold and --rsi-overbought must satisfy 0 < oversold < overbought < 100")]
+    RsiThresholdsInvalid,
 }
 
 #[cfg(test)]

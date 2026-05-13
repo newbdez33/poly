@@ -49,6 +49,40 @@ impl BinanceData {
 
     pub fn is_empty(&self) -> bool { self.candles.is_empty() }
     pub fn len(&self) -> usize { self.candles.len() }
+
+    /// Wilder-style RSI(period) computed on the `n` most-recent closes whose
+    /// open_ts < `ts`. Returns None if fewer than `period + 1` such candles
+    /// exist. Returns 0..100.
+    ///
+    /// For BTC 5min markets, querying RSI at the window's `open_ts` uses the
+    /// preceding 14 minutes of 1-min closes — capturing the latest momentum
+    /// without leaking forward-look data.
+    pub fn rsi_at(&self, ts: i64, period: usize) -> Option<f64> {
+        let needed = period + 1;
+        // Find index of first candle with open_ts >= ts (strictly before that is allowed).
+        let end_idx = match self.candles.binary_search_by_key(&ts, |c| c.open_ts) {
+            Ok(i) => i,    // candle AT ts: exclude (window-open candle hasn't closed)
+            Err(i) => i,   // first candle after ts: same exclusion
+        };
+        if end_idx < needed { return None; }
+        let start = end_idx - needed;
+        let slice = &self.candles[start..end_idx];
+
+        // Wilder's smoothing: classic RSI.
+        let mut gain_sum = 0.0;
+        let mut loss_sum = 0.0;
+        for i in 1..slice.len() {
+            let diff = slice[i].close - slice[i - 1].close;
+            if diff >= 0.0 { gain_sum += diff; } else { loss_sum -= diff; }
+        }
+        let avg_gain = gain_sum / period as f64;
+        let avg_loss = loss_sum / period as f64;
+        if avg_loss == 0.0 {
+            return Some(if avg_gain == 0.0 { 50.0 } else { 100.0 });
+        }
+        let rs = avg_gain / avg_loss;
+        Some(100.0 - 100.0 / (1.0 + rs))
+    }
 }
 
 pub struct BinanceFetcher {

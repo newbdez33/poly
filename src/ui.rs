@@ -159,10 +159,18 @@ fn render_trader_subtitle(frame: &mut Frame, area: Rect, state: &UiState) {
                 crate::trader::ladder::Direction::Up => "UP",
                 crate::trader::ladder::Direction::Down => "DOWN",
             };
-            Line::from(format!(
-                " Trader  {dir}  ladder={}  P&L: ${} ",
-                l.current_step, l.realized_pnl_usd,
-            ))
+            let (mode_text, mode_style) = if l.dry_run {
+                (" DRY-RUN ", Style::default().fg(Color::Yellow).bg(Color::Black).add_modifier(Modifier::BOLD))
+            } else {
+                (" LIVE ", Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD))
+            };
+            Line::from(vec![
+                Span::styled(mode_text, mode_style),
+                Span::raw(format!(
+                    " Trader  {dir}  ladder={}  P&L: ${} ",
+                    l.current_step, l.realized_pnl_usd,
+                )),
+            ])
         }
     };
     frame.render_widget(Paragraph::new(line), area);
@@ -220,8 +228,26 @@ fn format_event_kind(kind: &crate::trader::event::TraderEventKind) -> String {
         SellFilled { proceeds_usd } => format!("SellFilled ${proceeds_usd}"),
         SellRejected { reason } => format!("SellRejected {reason}"),
         LadderUpdated {
-            from_step, to_step, ..
-        } => format!("LadderUpdated {from_step}->{to_step}"),
+            from_step, to_step, outcome,
+        } => {
+            use crate::trader::ladder::{SkipReason, WindowOutcome};
+            let detail = match outcome {
+                WindowOutcome::Won { proceeds_usd, cost_usd } => {
+                    format!("WON +${}", proceeds_usd - cost_usd)
+                }
+                WindowOutcome::Lost { spent_usd } => format!("LOST -${spent_usd}"),
+                WindowOutcome::Skipped { reason } => match reason {
+                    SkipReason::RsiNeutralFilter { rsi } => format!("SKIP RSI={rsi}"),
+                    SkipReason::RsiFetchFailed => "SKIP RSI-FAIL".into(),
+                    SkipReason::PriceOutsideBand { ask } => format!("SKIP band ask={ask}"),
+                    SkipReason::FillOrKillFailed => "SKIP FoK-failed".into(),
+                    SkipReason::ResolutionTimeout => "SKIP resolve-timeout".into(),
+                    SkipReason::GammaApiUnavailable => "SKIP gamma-down".into(),
+                    SkipReason::MarketNotFound => "SKIP no-market".into(),
+                },
+            };
+            format!("Lad {from_step}->{to_step}  {detail}")
+        }
         Alert { message } => format!("ALERT {message}"),
         BuyLimitPosted { price, .. } => format!("BuyLimitPosted @ {price}"),
         BuyLimitSwept { from_price, to_price } => format!("BuyLimitSwept {from_price}->{to_price}"),

@@ -140,7 +140,7 @@ async fn main() -> Result<()> {
     let mut all_stats = Vec::new();
     for strategy in &strategies {
         println!("[poly-backtest]   running {}...", strategy.name);
-        let result = run_strategy(strategy, &loaded.windows, oracle.as_ref());
+        let result = run_strategy(strategy, &loaded.windows, oracle.as_ref(), Some(btc_arc.as_ref()));
         let stats = compute_stats(&result);
         println!("[poly-backtest]     PnL=${:.2}  win_rate={:.1}%  cap_resets={}  max_step={}  max_consec_losses={}",
             stats.total_pnl_usd, stats.win_rate * 100.0, stats.cap_resets,
