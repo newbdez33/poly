@@ -98,6 +98,7 @@ pub async fn run_window(
             events: deps.events.clone(),
             price: deps.price.clone(),
             emitter: deps.emitter.clone(),
+            resolver: deps.resolver.clone(),
         };
         return crate::trader::maker::run_maker(
             &maker_deps, ladder, &market, &token_id, dollars, ask, exit_cfg,
@@ -167,6 +168,7 @@ pub async fn run_window(
                     events: deps.events.clone(),
                     price: deps.price.clone(),
                     emitter: deps.emitter.clone(),
+                    resolver: deps.resolver.clone(),
                 };
                 let bf = crate::trader::maker::BuyFill {
                     shares: buy_fill.shares,

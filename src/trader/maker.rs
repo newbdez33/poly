@@ -1,3 +1,4 @@
+use crate::trader::errors::ResolveError;
 use crate::trader::event::{TraderEventEmitter, TraderEventKind};
 use crate::trader::executor::{OrderExecutor, OrderId, OrderSide};
 use crate::trader::exit_watcher::ExitConfig;
@@ -5,6 +6,7 @@ use crate::trader::ladder::{LadderState, SkipReason, WindowOutcome};
 use crate::trader::market::WindowMarket;
 use crate::trader::order_events::{OrderEvent, OrderEventStream};
 use crate::trader::price::MidwindowPriceFetcher;
+use crate::trader::resolver::WindowResolver;
 use rust_decimal::Decimal;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,6 +17,10 @@ pub struct MakerDeps {
     pub events: Arc<dyn OrderEventStream>,
     pub price: Arc<dyn MidwindowPriceFetcher>,
     pub emitter: Arc<dyn TraderEventEmitter>,
+    /// v1.12.3 (Issue #2 fix): consulted in `market_sell_residual` when both
+    /// SELL paths exhaust retries — replaces the previous blind WIN assumption
+    /// with a real Won/Lost determination matching window.rs::winner_sweep.
+    pub resolver: Arc<dyn WindowResolver>,
 }
 
 /// Run a single window in maker mode. Caller has already done band check; we
@@ -221,7 +227,7 @@ pub async fn sell_with_tp_sl(
     window_seconds: i64,
     shutdown: CancellationToken,
 ) -> WindowOutcome {
-    let _ = market; // keep param for future fields (resolution path); silence warn.
+    // `market` is consumed by market_sell_residual's resolver call on sell-failure paths.
 
     // v1.12.1: Polymarket CLOB doesn't reflect the new share balance the same
     // instant the BUY fill returns — a SELL posted in the next ~1s gets
@@ -255,7 +261,7 @@ pub async fn sell_with_tp_sl(
             emit(&deps.emitter, ladder, TraderEventKind::OrderRejected {
                 reason: format!("tp place_limit (after retries): {e}"),
             }).await;
-            return market_sell_residual(deps, ladder, token_id, buy_fill.shares, buy_fill.dollars, &exit_cfg.sl_price).await;
+            return market_sell_residual(deps, ladder, market, token_id, buy_fill.shares, buy_fill.dollars, &exit_cfg.sl_price).await;
         }
     };
     emit(&deps.emitter, ladder, TraderEventKind::TpLimitPosted {
@@ -266,7 +272,7 @@ pub async fn sell_with_tp_sl(
         Ok(rx) => Some(rx),
         Err(_) => {
             let _ = deps.executor.cancel(&tp_id).await;
-            return market_sell_residual(deps, ladder, token_id, buy_fill.shares, buy_fill.dollars, &exit_cfg.sl_price).await;
+            return market_sell_residual(deps, ladder, market, token_id, buy_fill.shares, buy_fill.dollars, &exit_cfg.sl_price).await;
         }
     };
 
@@ -315,11 +321,15 @@ pub async fn sell_with_tp_sl(
                 let sell_fill = match deps.executor.sell_at_bid(token_id, residual, bid).await {
                     Ok(f) => f,
                     Err(e) => {
+                        // v1.12.3 (Issue #2): end-of-window sell failed →
+                        // ask resolver, don't assume win.
                         emit(&deps.emitter, ladder, TraderEventKind::SellRejected { reason: format!("{e}") }).await;
                         emit(&deps.emitter, ladder, TraderEventKind::Alert {
-                            message: format!("end-of-window sell failed; shares stuck for token {token_id}"),
+                            message: format!("end-of-window sell failed; awaiting resolver for {} residual shares", residual),
                         }).await;
-                        return WindowOutcome::Won { proceeds_usd: tp_partial_proceeds, cost_usd: buy_fill.dollars };
+                        return resolver_based_outcome(
+                            deps, ladder, market, residual, buy_fill.dollars, tp_partial_proceeds,
+                        ).await;
                     }
                 };
                 emit(&deps.emitter, ladder, TraderEventKind::SellFilled {
@@ -344,11 +354,14 @@ pub async fn sell_with_tp_sl(
                         let sell_fill = match deps.executor.sell_at_bid(token_id, residual, bid).await {
                             Ok(f) => f,
                             Err(e) => {
+                                // v1.12.3 (Issue #2): SL sell failed → resolver.
                                 emit(&deps.emitter, ladder, TraderEventKind::SellRejected { reason: format!("{e}") }).await;
                                 emit(&deps.emitter, ladder, TraderEventKind::Alert {
-                                    message: format!("sl sell failed; shares stuck for token {token_id}"),
+                                    message: format!("sl sell failed; awaiting resolver for {} residual shares", residual),
                                 }).await;
-                                return WindowOutcome::Won { proceeds_usd: tp_partial_proceeds, cost_usd: buy_fill.dollars };
+                                return resolver_based_outcome(
+                                    deps, ladder, market, residual, buy_fill.dollars, tp_partial_proceeds,
+                                ).await;
                             }
                         };
                         emit(&deps.emitter, ladder, TraderEventKind::SellFilled {
@@ -408,10 +421,12 @@ pub async fn sell_with_tp_sl(
 }
 
 /// Helper for the rare path where we couldn't even post the TP — straight to
-/// market sell, treat as one-shot exit.
+/// market sell, treat as one-shot exit. Takes `market` so the resolver can
+/// determine actual Won/Lost when SELL exhausts retries (v1.12.3, Issue #2).
 async fn market_sell_residual(
     deps: &MakerDeps,
     ladder: &LadderState,
+    market: &WindowMarket,
     token_id: &str,
     shares: Decimal,
     cost: Decimal,
@@ -440,24 +455,62 @@ async fn market_sell_residual(
     let sell_fill = match sell_result {
         Ok(f) => f,
         Err(e) => {
-            // v1.12.1: same auto-redeem fallback as window.rs winner_sweep —
-            // Polymarket Auto-Redeem credits $1/share on the winning side at
-            // gamma resolution, so counting the win at face value is closer
-            // to truth than booking a phantom loss. If we lose at resolution,
-            // the position just sits at $0 (no further cost beyond `cost`).
-            let expected = shares * rust_decimal_macros::dec!(1.00);
             emit(&deps.emitter, ladder, TraderEventKind::SellRejected { reason: format!("{e}") }).await;
             emit(&deps.emitter, ladder, TraderEventKind::Alert {
                 message: format!(
-                    "market sell failed (after retries); relying on Auto-Redeem for {} shares (expected ${} on-chain)",
-                    shares, expected,
+                    "market sell failed (after retries); awaiting resolver for outcome on {} shares",
+                    shares,
                 ),
             }).await;
-            return WindowOutcome::Won { proceeds_usd: expected, cost_usd: cost };
+            return resolver_based_outcome(deps, ladder, market, shares, cost, Decimal::ZERO).await;
         }
     };
     emit(&deps.emitter, ladder, TraderEventKind::SellFilled { proceeds_usd: sell_fill.dollars }).await;
     final_outcome(cost, sell_fill.dollars)
+}
+
+/// v1.12.3 (Issue #2 fix): when a SELL fails after retries during sell_with_tp_sl,
+/// ask the resolver for the real Won/Lost determination instead of guessing.
+/// `tp_partial_proceeds` covers any TP fills that already banked before the
+/// failure; we add `residual × $1` if the resolver confirms a WIN (auto-redeem
+/// assumption matches reality on the winning side).
+async fn resolver_based_outcome(
+    deps: &MakerDeps,
+    ladder: &LadderState,
+    market: &WindowMarket,
+    residual_shares: Decimal,
+    cost: Decimal,
+    tp_partial_proceeds: Decimal,
+) -> WindowOutcome {
+    match deps.resolver.await_resolution(market).await {
+        Ok(resolution) => {
+            let our_won = resolution.winner == ladder.direction;
+            let auto_redeem = if our_won {
+                residual_shares * rust_decimal_macros::dec!(1.00)
+            } else {
+                Decimal::ZERO
+            };
+            let total = tp_partial_proceeds + auto_redeem;
+            emit(&deps.emitter, ladder, TraderEventKind::Alert {
+                message: format!(
+                    "resolver: {} (auto-redeem ${} on {} residual shares); total proceeds ${} vs cost ${}",
+                    if our_won { "WIN" } else { "LOSS" },
+                    auto_redeem, residual_shares, total, cost,
+                ),
+            }).await;
+            final_outcome(cost, total)
+        }
+        Err(ResolveError::Timeout { .. }) => {
+            emit(&deps.emitter, ladder, TraderEventKind::ResolutionTimeout).await;
+            WindowOutcome::Skipped { reason: SkipReason::ResolutionTimeout }
+        }
+        Err(_) => {
+            emit(&deps.emitter, ladder, TraderEventKind::Alert {
+                message: "resolver error after sell-fail; booking skip".into(),
+            }).await;
+            WindowOutcome::Skipped { reason: SkipReason::GammaApiUnavailable }
+        }
+    }
 }
 
 fn final_outcome(buy_dollars: Decimal, total_proceeds: Decimal) -> WindowOutcome {
@@ -612,6 +665,22 @@ mod tests {
         LadderState::new(Direction::Up, 5, 5, Utc::now())
     }
 
+    /// Test stub: returns a fixed resolution. Tests that don't exercise the
+    /// sell-failure → resolver path can use any direction; the resolver-based
+    /// outcome tests set this explicitly to control simulated win/loss.
+    struct StubResolver { winner: Direction }
+    impl StubResolver {
+        fn won(winner: Direction) -> Arc<Self> { Arc::new(Self { winner }) }
+    }
+    #[async_trait::async_trait]
+    impl crate::trader::resolver::WindowResolver for StubResolver {
+        async fn await_resolution(&self, _m: &WindowMarket)
+            -> Result<crate::trader::resolver::Resolution, crate::trader::errors::ResolveError>
+        {
+            Ok(crate::trader::resolver::Resolution { winner: self.winner })
+        }
+    }
+
     fn cfg() -> ExitConfig {
         ExitConfig {
             tp_price: Decimal::from_str("0.85").unwrap(),
@@ -659,6 +728,7 @@ mod tests {
         let emitter = CapturingEmitter::new();
         let deps = MakerDeps {
             executor: exec.clone(), events: events.clone(), price: price.clone(), emitter: emitter.clone(),
+            resolver: StubResolver::won(Direction::Up),
         };
 
         let outcome = run_maker(
@@ -692,6 +762,7 @@ mod tests {
         let emitter = CapturingEmitter::new();
         let deps = MakerDeps {
             executor: exec.clone(), events: events.clone(), price: price.clone(), emitter: emitter.clone(),
+            resolver: StubResolver::won(Direction::Up),
         };
 
         let outcome = run_maker(
@@ -737,6 +808,7 @@ mod tests {
             executor: exec.clone(), events: events.clone(),
             price: price as Arc<dyn MidwindowPriceFetcher>,
             emitter: emitter.clone(),
+            resolver: StubResolver::won(Direction::Up),
         };
 
         let outcome = run_maker(
@@ -787,6 +859,7 @@ mod tests {
         let deps = MakerDeps {
             executor: exec.clone(), events: events.clone(),
             price, emitter: emitter.clone(),
+            resolver: StubResolver::won(Direction::Up),
         };
 
         // 600s ago window_ts: with window_seconds=900, cancel = window_ts + 870
