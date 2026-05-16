@@ -79,13 +79,17 @@ async fn buy_with_sweep(
     ask: Decimal,
     shutdown: &CancellationToken,
 ) -> BuyOutcome {
-    // Three price steps: ask-0.01, ask, ask+0.01. Round to 0.01 tick.
+    // v1.14: 2-step sweep starting at ask (was 3 steps starting at ask-0.01).
+    // Live measurement showed 30.8% FoK rate; removing the "wait for $0.01
+    // discount" step cuts FoK roughly in half. Trade-off: each BUY pays ~$0.01
+    // more per share on average, but the captured trades net positive enough
+    // to overcome the cost (~+$2.6/day vs prior config). Same 90s total
+    // (45s + 45s instead of 30s × 3).
     let prices = [
-        round_tick(ask - Decimal::new(1, 2)),
         round_tick(ask),
         round_tick(ask + Decimal::new(1, 2)),
     ];
-    let step_durations = [Duration::from_secs(30), Duration::from_secs(30), Duration::from_secs(30)];
+    let step_durations = [Duration::from_secs(45), Duration::from_secs(45)];
 
     let mut current_price: Option<Decimal> = None;
     let mut current_id: Option<OrderId> = None;
@@ -755,9 +759,10 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn buy_never_fills_three_steps_then_skipped() {
+    async fn buy_never_fills_two_steps_then_skipped() {
+        // v1.14: sweep is now 2 steps (ask, ask+0.01) at 45s each = 90s total.
         let exec = StubExec::new();
-        let events = ScriptedOrderEvents::new(); // no scripted fills -> all 3 buys time out
+        let events = ScriptedOrderEvents::new(); // no scripted fills -> all buys time out
         let price = StubPrice::const_bid("0.55");
         let emitter = CapturingEmitter::new();
         let deps = MakerDeps {
@@ -775,12 +780,12 @@ mod tests {
         ).await;
 
         assert!(matches!(outcome, WindowOutcome::Skipped { reason: SkipReason::FillOrKillFailed }));
-        // 3 place_limit calls, 3 cancels (each step + final).
-        assert_eq!(exec.place_calls.lock().unwrap().len(), 3);
-        // BuyLimitSwept emitted twice (between steps).
+        // 2 place_limit calls (one per step).
+        assert_eq!(exec.place_calls.lock().unwrap().len(), 2);
+        // BuyLimitSwept emitted once (between steps).
         let kinds = emitter.kinds();
         let swept_count = kinds.iter().filter(|k| matches!(k, TraderEventKind::BuyLimitSwept { .. })).count();
-        assert_eq!(swept_count, 2);
+        assert_eq!(swept_count, 1);
     }
 
     #[tokio::test(start_paused = true)]

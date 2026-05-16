@@ -129,6 +129,7 @@ mod tests {
             exit: ExitRule::HoldToResolution,
             follow_previous_winner: false,
             direction_signal: None,
+            passive_entry_price: None,
         }
     }
 

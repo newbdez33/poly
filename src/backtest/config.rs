@@ -104,6 +104,11 @@ pub struct StrategyConfig {
     /// `direction` (or `follow_previous_winner` if set). If Some, overrides
     /// both based on RSI or other technical indicators.
     pub direction_signal: Option<DirectionSignal>,
+    /// v1.14: passive maker entry — instead of buying at t=0 ask, post a
+    /// limit BID at this fixed price and wait for it to fill. If ask never
+    /// drops to this level by `entry_cutoff_secs` (240s default), skip.
+    /// `None` = original taker-at-t=0 behavior.
+    pub passive_entry_price: Option<Decimal>,
 }
 
 /// v1.11: technical-indicator-based per-window direction rules.
@@ -133,6 +138,15 @@ pub enum DirectionSignal {
         /// counter-trend RSI signals at or beyond this slope get skipped.
         slope_threshold: f64,
     },
+    /// v1.14: late-window momentum. At t = `entry_offset_secs` into the
+    /// window, compare current BTC price to `price_to_beat`. If the gap
+    /// exceeds `threshold_dollars`, bet in the gap's direction. Otherwise
+    /// skip. Entry happens at the chosen offset (not t=0), so the share
+    /// price reflects late-window certainty — higher cost, higher win rate.
+    LateMomentum {
+        entry_offset_secs: u32,
+        threshold_dollars: f64,
+    },
 }
 
 pub fn strategy_set() -> Vec<StrategyConfig> {
@@ -146,6 +160,7 @@ pub fn strategy_set() -> Vec<StrategyConfig> {
         exit,
         follow_previous_winner: false,
         direction_signal: None,
+        passive_entry_price: None,
     };
     let follow_prev = |name: &str, exit: ExitRule, stake: StakeRule| StrategyConfig {
         follow_previous_winner: true,
@@ -327,6 +342,36 @@ pub fn strategy_set() -> Vec<StrategyConfig> {
             ExitRule::TpOnlyOrHold { tp_price: dec!(0.87) },
             StakeRule::Martingale { base: dec!(5), max_step: 5 },
             DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 25.0, overbought: 75.0 }),
+        // v1.14: LateMomentum — enter at t=offset, bet direction of |BTC-price_to_beat|.
+        // Exit = hold to resolution (no TP, no SL). High entry cost, hopefully high win rate.
+        with_signal("47_late_60s_d10",
+            ExitRule::HoldToResolution,
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::LateMomentum { entry_offset_secs: 240, threshold_dollars: 10.0 }),
+        with_signal("48_late_60s_d30",
+            ExitRule::HoldToResolution,
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::LateMomentum { entry_offset_secs: 240, threshold_dollars: 30.0 }),
+        with_signal("49_late_30s_d10",
+            ExitRule::HoldToResolution,
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::LateMomentum { entry_offset_secs: 270, threshold_dollars: 10.0 }),
+        with_signal("50_late_30s_d30",
+            ExitRule::HoldToResolution,
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::LateMomentum { entry_offset_secs: 270, threshold_dollars: 30.0 }),
+        // v1.14: passive maker — wait for ask to drop to $0.46 (cheap entry)
+        // then post-fill BID @ $0.46. Otherwise skip the window. Same RSI +
+        // TP=$0.83 as strategy 32, just with a passive limit-BID entry.
+        StrategyConfig {
+            passive_entry_price: Some(dec!(0.46)),
+            band_min: dec!(0.40),  // widen band so $0.46 ask is in range
+            band_max: dec!(0.55),
+            ..with_signal("51_rsi_fixed_tp83_passive46",
+                ExitRule::TpOnlyOrHold { tp_price: dec!(0.83) },
+                StakeRule::Fixed { stake: dec!(5) },
+                DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 })
+        },
     ]
 }
 
@@ -365,7 +410,7 @@ mod tests {
         let mut names: Vec<&String> = s.iter().map(|c| &c.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 46);
+        assert_eq!(names.len(), 51);
     }
 
     #[test]
@@ -386,8 +431,8 @@ mod tests {
     #[test]
     fn filter_all_returns_everything() {
         let s = strategy_set();
-        assert_eq!(filter_strategies(&s, "all").len(), 46);
-        assert_eq!(filter_strategies(&s, "").len(), 46);
+        assert_eq!(filter_strategies(&s, "all").len(), 51);
+        assert_eq!(filter_strategies(&s, "").len(), 51);
     }
 
     #[test]
@@ -507,9 +552,9 @@ mod tests {
     }
 
     #[test]
-    fn strategy_set_has_fortysix_strategies() {
+    fn strategy_set_has_fiftyone_strategies() {
         let s = strategy_set();
-        assert_eq!(s.len(), 46);
+        assert_eq!(s.len(), 51);
     }
 
     #[test]

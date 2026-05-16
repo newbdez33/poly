@@ -64,6 +64,129 @@ fn pick_direction_with_signal(
         }
         DirectionSignal::Random { .. } => (fallback, false), // handled in run_strategy
         DirectionSignal::RsiWithTrendFilter { .. } => (fallback, false), // handled in run_strategy
+        DirectionSignal::LateMomentum { .. } => (fallback, false), // handled in run_strategy
+    }
+}
+
+/// v1.14 passive maker: post a limit BID at `entry_price` for direction `dir`.
+/// Walks the window second-by-second checking the oracle's ask for that side.
+/// On the first second the ask drops to or below `entry_price`, simulate fill
+/// at `entry_price`. After fill, walk to either TP trigger or window-close
+/// resolution (depending on `exit_rule`). If ask never reaches entry_price by
+/// t=240s, skip.
+fn simulate_passive_maker(
+    window: &crate::backtest::data::gamma_history::WindowMeta,
+    oracle: &dyn crate::backtest::oracle::TokenPriceOracle,
+    stake: Decimal,
+    entry_price: Decimal,
+    dir: Direction,
+    exit_rule: &crate::backtest::config::ExitRule,
+) -> WindowOutcome {
+    use crate::backtest::config::ExitRule;
+    use rust_decimal_macros::dec;
+    const ENTRY_CUTOFF: u32 = 240;
+    // Walk t=0..ENTRY_CUTOFF looking for ask <= entry_price.
+    let mut entry_t: Option<u32> = None;
+    for t in 0..=ENTRY_CUTOFF {
+        let (up_bid, up_ask) = oracle.price_at(window, t);
+        let side_ask = match dir {
+            Direction::Up => up_ask,
+            Direction::Down => (Decimal::ONE - up_bid).max(Decimal::ZERO),
+        };
+        if side_ask > Decimal::ZERO && side_ask <= entry_price {
+            entry_t = Some(t);
+            break;
+        }
+    }
+    let Some(entry_t) = entry_t else {
+        return WindowOutcome::Skipped { reason: SkipReason::PriceOutsideBand { ask: Decimal::ZERO } };
+    };
+    let shares = (stake / entry_price).floor();
+    if shares < dec!(5) {
+        return WindowOutcome::Skipped { reason: SkipReason::FillOrKillFailed };
+    }
+    let dollars_spent = shares * entry_price;
+    // Now walk forward looking for TP fill (if exit_rule is TpOnlyOrHold).
+    let tp_price = match exit_rule {
+        ExitRule::TpOnlyOrHold { tp_price } => Some(*tp_price),
+        _ => None,
+    };
+    if let Some(tp) = tp_price {
+        for t in entry_t..=300 {
+            let (bid, _ask) = oracle.price_at(window, t);
+            let side_bid = match dir {
+                Direction::Up => bid,
+                Direction::Down => (Decimal::ONE - oracle.price_at(window, t).1).max(Decimal::ZERO),
+            };
+            if side_bid >= tp {
+                let proceeds = shares * side_bid;
+                return WindowOutcome::Won { proceeds_usd: proceeds, cost_usd: dollars_spent };
+            }
+        }
+    }
+    // Fall through to resolution.
+    if window.winner == Some(dir) {
+        WindowOutcome::Won {
+            proceeds_usd: shares * dec!(0.99),
+            cost_usd: dollars_spent,
+        }
+    } else {
+        WindowOutcome::Lost { spent_usd: dollars_spent }
+    }
+}
+
+/// v1.14 LateMomentum: at `entry_offset_secs` into the window, compare current
+/// BTC price (chainlink-equivalent via BinanceData) to `price_to_beat`. If the
+/// gap exceeds `threshold_dollars`, BUY in the gap's direction at the oracle's
+/// ask at that moment and hold to resolution. Otherwise skip.
+fn simulate_late_momentum(
+    window: &crate::backtest::data::gamma_history::WindowMeta,
+    btc: Option<&crate::backtest::data::binance::BinanceData>,
+    oracle: &dyn crate::backtest::oracle::TokenPriceOracle,
+    stake: Decimal,
+    entry_offset_secs: u32,
+    threshold_dollars: f64,
+) -> WindowOutcome {
+    use rust_decimal_macros::dec;
+    use rust_decimal::prelude::ToPrimitive;
+
+    // Need BTC data + price_to_beat from window meta.
+    let (Some(btc), Some(ptb)) = (btc, window.price_to_beat.to_f64()) else {
+        return WindowOutcome::Skipped { reason: SkipReason::GammaApiUnavailable };
+    };
+    let entry_ts = window.window_ts + entry_offset_secs as i64;
+    let Some(current_btc) = btc.price_at(entry_ts) else {
+        return WindowOutcome::Skipped { reason: SkipReason::GammaApiUnavailable };
+    };
+    let delta = current_btc - ptb;
+    if delta.abs() < threshold_dollars {
+        return WindowOutcome::Skipped { reason: SkipReason::PriceOutsideBand { ask: Decimal::ZERO } };
+    }
+    let direction = if delta > 0.0 { Direction::Up } else { Direction::Down };
+    // Oracle returns (bid, ask) for the UP token. For DOWN, we buy the DOWN
+    // token whose ask ≈ 1 - up_bid (binary complementary market).
+    let (up_bid, up_ask) = oracle.price_at(window, entry_offset_secs);
+    let ask = match direction {
+        Direction::Up => up_ask,
+        Direction::Down => (Decimal::ONE - up_bid).max(Decimal::ZERO),
+    };
+    if ask <= Decimal::ZERO {
+        return WindowOutcome::Skipped { reason: SkipReason::PriceOutsideBand { ask } };
+    }
+    let shares = (stake / ask).floor();
+    if shares < dec!(5) {
+        return WindowOutcome::Skipped { reason: SkipReason::FillOrKillFailed };
+    }
+    let dollars_spent = shares * ask;
+    let our_won = window.winner == Some(direction);
+    if our_won {
+        // Resolution payout: shares × $1.00.
+        WindowOutcome::Won {
+            proceeds_usd: shares * dec!(1.00),
+            cost_usd: dollars_spent,
+        }
+    } else {
+        WindowOutcome::Lost { spent_usd: dollars_spent }
     }
 }
 
@@ -131,6 +254,59 @@ pub fn run_strategy_with_opts(
         };
         let step_before = ladder.current_step;
 
+        // v1.14: passive maker entry — wait for ask to drop to fixed bid
+        // price, enter there. Requires RSI filter or direction to pick a side.
+        if let Some(entry_price) = strategy.passive_entry_price {
+            // First, determine direction (use existing RSI signal if any).
+            let dir = match &strategy.direction_signal {
+                Some(DirectionSignal::RsiFilterSkipNeutral { period, oversold, overbought, .. }) => {
+                    let rsi = btc.and_then(|b| b.rsi_at(window.window_ts, *period));
+                    match rsi {
+                        Some(r) if r < *oversold => Some(Direction::Up),
+                        Some(r) if r > *overbought => Some(Direction::Down),
+                        _ => None,
+                    }
+                }
+                _ => Some(strategy.direction),
+            };
+            let outcome = match dir {
+                None => WindowOutcome::Skipped { reason: SkipReason::PriceOutsideBand { ask: Decimal::ZERO } },
+                Some(d) => simulate_passive_maker(window, oracle, stake, entry_price, d, &strategy.exit),
+            };
+            prev_winner = window.winner;
+            ladder = apply_outcome(&ladder, &outcome, Utc::now());
+            session_pnl = ladder.realized_pnl_usd;
+            history.push(WindowResult {
+                window_ts: window.window_ts, stake, outcome,
+                ladder_step_before: step_before,
+                ladder_step_after: ladder.current_step,
+                ladder_pnl_after: total_pnl + session_pnl,
+            });
+            continue;
+        }
+
+        // v1.14: LateMomentum is handled completely separately — it enters
+        // mid-window (not t=0) and uses chainlink-based outcome rather than
+        // walking the oracle. Short-circuit here before the t=0 entry path.
+        if let Some(DirectionSignal::LateMomentum { entry_offset_secs, threshold_dollars }) = &strategy.direction_signal {
+            let outcome = simulate_late_momentum(
+                window, btc, oracle, stake,
+                *entry_offset_secs, *threshold_dollars,
+            );
+            prev_winner = window.winner;
+            ladder = apply_outcome(&ladder, &outcome, Utc::now());
+            session_pnl = ladder.realized_pnl_usd;
+            history.push(WindowResult {
+                window_ts: window.window_ts,
+                stake,
+                outcome,
+                ladder_step_before: step_before,
+                ladder_step_after: ladder.current_step,
+                ladder_pnl_after: total_pnl + session_pnl,
+            });
+            continue;
+        }
+
         // Per-window direction selection.
         // v1.11 direction_signal takes precedence over v1.10 follow_previous.
         let (effective_dir, skip_neutral) = match &strategy.direction_signal {
@@ -182,7 +358,9 @@ pub fn run_strategy_with_opts(
                     | DirectionSignal::RsiPlusAntiFollow { period, .. } => {
                         b.rsi_at(window.window_ts, *period)
                     }
-                    DirectionSignal::Random { .. } | DirectionSignal::RsiWithTrendFilter { .. } => None,
+                    DirectionSignal::Random { .. }
+                    | DirectionSignal::RsiWithTrendFilter { .. }
+                    | DirectionSignal::LateMomentum { .. } => None,
                 });
                 pick_direction_with_signal(signal, rsi, prev_winner, strategy.direction)
             }
@@ -267,6 +445,7 @@ mod tests {
             exit: ExitRule::HoldToResolution,
             follow_previous_winner: false,
             direction_signal: None,
+            passive_entry_price: None,
         }
     }
 
