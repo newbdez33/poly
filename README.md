@@ -56,6 +56,88 @@ All via `.env` (see `.env.example`):
 
 Logs go to `logs/poly.log` (daily-rotated). Stdout is never written to while the TUI is up.
 
+## Deployment
+
+### Platform support
+
+Cross-platform Rust — builds and runs on **Linux**, **macOS**, and **Windows**. Linux is the recommended host for live trading: native tmux, systemd auto-restart, stable WS stack, no antivirus interference. Windows works fine for development.
+
+### Hardware requirements
+
+This is an IO-bound bot (HTTP polling + a handful of WebSockets), not CPU-bound. Even the most modest VPS is enough.
+
+| Resource | Trader only | Trader + TUI + recorder |
+|---|---|---|
+| CPU | 1 vCPU | 1–2 vCPU |
+| RAM | 256 MB | 512 MB – 1 GB |
+| Disk | 1 GB (logs) | 25 GB (orderbook DB grows ~50 MB/day) |
+| Network | 1 Mbps stable | 5 Mbps stable |
+| Latency to AWS us-east-1 | <100 ms | <100 ms |
+
+A $5/mo cloud VPS (1 vCPU / 1 GB RAM / 25 GB SSD) is sufficient. Polymarket's API lives in AWS us-east-1 — picking Tokyo/Singapore/Mumbai keeps WS round-trip at 30–50 ms.
+
+### Linux quick start
+
+```bash
+# Dependencies (Debian/Ubuntu)
+sudo apt install -y build-essential pkg-config libssl-dev redis-server tmux git curl
+
+# Install Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+
+# Clone + build
+git clone <repo-url> poly && cd poly
+cargo build --release --bin poly-trader --bin poly-tui
+
+# Configure
+cp .env.example .env
+# Edit .env — paste your dedicated wallet's POLYMARKET_PRIVATE_KEY
+
+# Run under tmux
+tmux new -s poly
+./target/release/poly-trader \
+  --direction up --base 10 --max-step 5 \
+  --exit-rule tp-sl --tp-price 0.83 \
+  --rsi-filter --maker --fixed-stake
+# Ctrl-b d to detach; `tmux attach -t poly` to return
+```
+
+### systemd unit (auto-restart on crash)
+
+`/etc/systemd/system/poly-trader.service`:
+
+```ini
+[Unit]
+Description=Polymarket Trader
+After=network.target redis.service
+Requires=redis.service
+
+[Service]
+Type=simple
+User=poly
+WorkingDirectory=/opt/poly
+EnvironmentFile=/opt/poly/.env
+ExecStart=/opt/poly/target/release/poly-trader \
+  --direction up --base 10 --max-step 5 \
+  --exit-rule tp-sl --tp-price 0.83 \
+  --rsi-filter --maker --fixed-stake
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now poly-trader
+sudo journalctl -fu poly-trader   # tail logs
+```
+
+### Windows / macOS notes
+
+Builds and runs identically with `cargo build --release`. The Windows dev environment uses a few PowerShell helper scripts (`/tmp/*.ps1`) for Redis inspection and process control — convenience only, not required. On macOS you can swap systemd for `launchd` or just keep `tmux` open.
+
 ## Architecture
 
 Single binary, three tokio tasks:
