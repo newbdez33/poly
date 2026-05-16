@@ -94,13 +94,15 @@ async fn buy_with_sweep(
     let mut current_price: Option<Decimal> = None;
     let mut current_id: Option<OrderId> = None;
 
+    // Authoritative share count: the ladder already knows how many shares we
+    // intend to buy this step (base_shares in fixed-stake mode, base*2^(step-1)
+    // in Martingale). Use that directly instead of round-tripping through
+    // `dollars / step_price` — that path lost a share whenever raw ask was
+    // just below the rounded step_price (e.g. ask=0.499, step_price=0.50,
+    // floor(4.99/0.50)=9). `dollars` stays as a budget-informational input.
+    let shares = Decimal::from(ladder.current_bet_shares());
+    let _ = dollars;
     for (step_idx, (&step_price, &step_dur)) in prices.iter().zip(step_durations.iter()).enumerate() {
-        // Compute share size: floor(dollars / step_price), require >=5 shares.
-        let shares = if step_price > Decimal::ZERO {
-            (dollars / step_price).floor()
-        } else {
-            Decimal::ZERO
-        };
         if shares < Decimal::from(5) {
             // Can't post a sub-min order. Skip the whole window.
             return BuyOutcome::Skipped;
