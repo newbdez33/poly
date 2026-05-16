@@ -105,7 +105,7 @@ tmux new -s poly
 
 ### systemd unit (auto-restart on crash)
 
-`/etc/systemd/system/poly-trader.service`:
+Template at `docs/systemd/poly-trader.service` (edit paths/user, then `sudo cp` into place):
 
 ```ini
 [Unit]
@@ -133,6 +133,48 @@ WantedBy=multi-user.target
 sudo systemctl enable --now poly-trader
 sudo journalctl -fu poly-trader   # tail logs
 ```
+
+### Restarting after a rebuild
+
+`poly-trader` writes a Redis lock (`poly:prod:trader:lock`) on startup but does not release it on shutdown. A bare `systemctl restart` after rebuilding will fail with `Error: another poly-trader is running (lock held)` because the stale lock still names the old PID. Always:
+
+```bash
+redis-cli DEL poly:prod:trader:lock
+sudo systemctl reset-failed poly-trader
+sudo systemctl restart poly-trader
+```
+
+### Remote monitoring (local TUI → remote trader)
+
+Run `poly-tui` on your laptop pointed at the VM's Redis over an SSH tunnel. No need to open Redis to the internet, no need to build the TUI on the VM.
+
+**Manual:**
+
+```bash
+# Terminal 1 — tunnel (keep open)
+ssh -N -L 16379:127.0.0.1:6379 ubuntu@<vm-ip>
+
+# Terminal 2 — TUI
+REDIS_URL=redis://127.0.0.1:16379 ./target/release/poly-tui
+```
+
+**With the bundled shell helpers:**
+
+| Shell | File | How to load |
+|---|---|---|
+| PowerShell (Windows) | `docs/profile/poly-tui-remote.ps1` | append to `$PROFILE` |
+| bash / zsh (Linux, macOS) | `docs/profile/poly-tui-remote.sh` | `source` from `~/.bashrc` or `~/.zshrc` |
+
+Edit the two variables at the top of the file (VM hostname/IP and TUI binary path). Then in any new shell:
+
+| Alias | Effect |
+|---|---|
+| `poly-tunnel-up` | Start the SSH tunnel in the background |
+| `poly-tunnel-down` | Kill the tunnel |
+| `poly-tunnel` | Show tunnel status + VM event count |
+| `poly-tui-remote` | Auto-start tunnel if needed, launch the TUI against VM Redis, restore `REDIS_URL` on exit |
+
+The TUI auto-detects window length, refreshes every 5s, and the four bottom LEDs (CLOB · Redis · Trader · Chainlink) report dataflow health.
 
 ### Windows / macOS notes
 

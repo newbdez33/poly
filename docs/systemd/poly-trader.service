@@ -1,0 +1,33 @@
+[Unit]
+Description=Polymarket BTC 5-min Trader (v1.14)
+After=network-online.target redis-server.service
+Wants=network-online.target
+Requires=redis-server.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/poly
+EnvironmentFile=/home/ubuntu/poly/.env
+ExecStart=/home/ubuntu/poly/target/release/poly-trader \
+  --direction up \
+  --base 10 \
+  --max-step 5 \
+  --exit-rule tp-sl \
+  --tp-price 0.83 \
+  --rsi-filter \
+  --maker \
+  --fixed-stake
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/home/ubuntu/poly/logs/poly-trader.systemd.log
+StandardError=append:/home/ubuntu/poly/logs/poly-trader.systemd.log
+
+# Resource limits — 1 GB RAM box, leave headroom for OS + redis
+MemoryMax=512M
+MemoryHigh=384M
+CPUQuota=150%
+
+[Install]
+WantedBy=multi-user.target
