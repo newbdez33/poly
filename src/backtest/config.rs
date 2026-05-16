@@ -316,6 +316,17 @@ pub fn strategy_set() -> Vec<StrategyConfig> {
                 period: 14, oversold: 30.0, overbought: 70.0,
                 ema_period: 50, slope_lookback_mins: 10, slope_threshold: 10.0,
             }),
+        // v1.12.4: stricter RSI thresholds (25/75) — fewer triggers, hopefully
+        // higher conviction. Live observed 53.7% win rate at 30/70, vs backtest's
+        // 60.6%; tightening filters out the borderline cases that may dilute alpha.
+        with_signal("45_rsi_fixed_tp87_2575",
+            ExitRule::TpOnlyOrHold { tp_price: dec!(0.87) },
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 25.0, overbought: 75.0 }),
+        with_signal("46_rsi_mart_tp87_2575",
+            ExitRule::TpOnlyOrHold { tp_price: dec!(0.87) },
+            StakeRule::Martingale { base: dec!(5), max_step: 5 },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 25.0, overbought: 75.0 }),
     ]
 }
 
@@ -354,7 +365,7 @@ mod tests {
         let mut names: Vec<&String> = s.iter().map(|c| &c.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 44);
+        assert_eq!(names.len(), 46);
     }
 
     #[test]
@@ -375,8 +386,8 @@ mod tests {
     #[test]
     fn filter_all_returns_everything() {
         let s = strategy_set();
-        assert_eq!(filter_strategies(&s, "all").len(), 44);
-        assert_eq!(filter_strategies(&s, "").len(), 44);
+        assert_eq!(filter_strategies(&s, "all").len(), 46);
+        assert_eq!(filter_strategies(&s, "").len(), 46);
     }
 
     #[test]
@@ -496,9 +507,9 @@ mod tests {
     }
 
     #[test]
-    fn strategy_set_has_fortyfour_strategies() {
+    fn strategy_set_has_fortysix_strategies() {
         let s = strategy_set();
-        assert_eq!(s.len(), 44);
+        assert_eq!(s.len(), 46);
     }
 
     #[test]

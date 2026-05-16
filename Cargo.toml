@@ -47,6 +47,7 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 cucumber = { version = "0.21", features = ["macros"] }
@@ -107,6 +108,10 @@ path = "src/bin/poly-backtest.rs"
 [[bin]]
 name = "poly-redeem"
 path = "src/bin/poly-redeem.rs"
+
+[[bin]]
+name = "poly-orderbook-recorder"
+path = "src/bin/poly-orderbook-recorder.rs"
 
 [[test]]
 name = "backtest_smoke"
