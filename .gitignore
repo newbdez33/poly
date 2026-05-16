@@ -19,7 +19,8 @@ Thumbs.db
 .playwright-mcp/
 tmp/
 
-# Backtest HTML reports (build artifacts, ~10MB each)
+# Generated reports (HTML + .log) — kept locally, never committed
+reports/
 backtest-report*.html
 bs-smoke.html
 report-*.html

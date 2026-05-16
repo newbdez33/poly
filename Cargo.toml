@@ -113,6 +113,10 @@ path = "src/bin/poly-redeem.rs"
 name = "poly-orderbook-recorder"
 path = "src/bin/poly-orderbook-recorder.rs"
 
+[[bin]]
+name = "poly-orderbook-report"
+path = "src/bin/poly-orderbook-report.rs"
+
 [[test]]
 name = "backtest_smoke"
 path = "tests/backtest_smoke.rs"

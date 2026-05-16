@@ -362,6 +362,19 @@ poly-backtest --start 2026-05-13 --end 2026-05-14 \
 
 **Finding from the 2026-05-13 validation.** With matched time range and stop-at-cap, the backtest produced **−$51.66 / 1 cap / max_consec_losses=5**, vs live **−$75.62 / 1 cap / max_consec_losses=5**. Structurally identical, but the backtest's `real` oracle is ~30% optimistic on PnL because it counts any recorded trade ≥ TP as a hit — live's 5s polling missed the brief touches. v1.12's `--tp-limit-sell` is the direct fix for that bias.
 
+### Scalp research tooling (v1.13)
+
+Four standalone binaries for exploring strategies outside the RSI-Martingale family. All read-only with respect to the live trader's Redis lock + state.
+
+| Binary | Purpose |
+|---|---|
+| `poly-scalp-analyze` | Offline analyzer over cached trade history. Finds $0.01 → $0.02 oscillation events per window with magnitude / time / per-window-count histograms. |
+| `poly-scalp` | Live observation mode (no real orders). Subscribes to Polymarket CLOB `market` channel, runs a dual-leg maker scalp state machine (BID @ $0.01 + ASK @ $0.02), prints would-have-filled events + per-minute stats. |
+| `poly-orderbook-recorder` | Continuous SQLite recorder of best bid/ask per token, 1-sec sampling. Writes to `~/.poly-orderbook/recorder.db` (WAL mode). ~50 MB/day. Foundation for depth-aware backtests. |
+| `poly-orderbook-report` | Read-only HTML dashboard combining the recorder DB + cached trade history. Renders volatility distribution, active-vs-resolution phase comparison, and a maker fill-rate estimate proxy. |
+
+**Negative-result finding (1c/2c scalp).** Backtest of cached trade history showed a 90% bounce rate from $0.01 to $0.02+ within 484 sample windows. Live observation contradicted this: 5 entries / 0 bounces / 0% hit rate over 3+ hours. Root cause confirmed by the orderbook report: 92% of bounces in the trade-history analysis concentrate in the last 30% of each window (resolution-phase order-book noise). The `poly-scalp` prototype's required 240s entry cutoff (no new entries in the last 60s) by design avoids that phase, leaving zero captureable opportunities within active trading. Sell-volume at $0.01 in the active 0-240s phase = 0 shares across observed days. **Documented for future reference: any maker-scalp idea must constrain analysis to the active-trading window from the start.**
+
 ### Window length (v1.7.1, 5/15/60 min)
 
 Default `--window-minutes 5` reproduces v1.7 behavior. Polymarket also offers 15-minute and 60-minute BTC up/down markets:

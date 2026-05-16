@@ -191,6 +191,36 @@ Spec / plan: `docs/superpowers/plans/2026-05-11-trader-hold-early-exit.md`.
 
 ---
 
+## v1.13 — Scalp research + orderbook recorder + Issue #2 fix ✅ COMPLETE (research only)
+
+**v1.12.3 (commit `fd56972`) — Issue #2 fix:** `maker.rs` now consults the resolver when SELL paths exhaust retries instead of returning `Won` with optimistic auto-redeem proceeds. The ladder's `realized_pnl_usd` now matches wallet reality. Added `resolver_based_outcome` helper used by all three sell-failure paths (TP-post-fail, end-of-window cancel-deadline, SL trigger).
+
+**Scalp $0.01/$0.02 research (failed, useful negative result):**
+
+Hypothesis: place maker BIDs @ $0.01 on both Up & Down of every 5min BTC window. When one side's ask collapses, our BID fills. Immediately post maker ASK @ $0.02 on that side. Bet on intra-window price oscillation.
+
+Tools built (all standalone, no live-trader impact):
+- [x] `src/bin/poly-scalp-analyze.rs` — offline trade-history analyzer. Detects entry/bounce events per window, histograms magnitude + time-of-window. On 484-window 3-day sample: 90%+ of windows that hit $0.01 also hit $0.02+ at some later point.
+- [x] `src/bin/poly-scalp.rs` — live observation prototype. Dual-leg state machine with configurable entry/bounce persistence thresholds. Subscribes to Polymarket CLOB `market` channel; no real orders.
+- [x] `src/bin/poly-orderbook-recorder.rs` — continuous SQLite recorder of best bid/ask per token, 1-sec sampling. ~50MB/day. Foundation for future depth-aware backtests.
+- [x] `src/bin/poly-orderbook-report.rs` — read-only HTML dashboard combining recorder DB + trade cache to show volatility distribution, active-vs-resolution phase comparison, and a fill-rate estimate proxy.
+
+Conclusion (after live + DB + replayed-backtest validation):
+
+> **Scalp 1c/2c is unprofitable in observed conditions.** Live observation: 5 entries / 0 bounces / 0% hit rate over 3+ hours. The backtest's 90% bounce rate came almost entirely from resolution-phase order-book noise (92% of bounces concentrate in the last 30% of window). With the live trader's required 240s entry cutoff, no resolution-phase events are reachable — and within the 0-240s active-trading window, sell-volume at $0.01 = 0 shares across the recorder's observed days. Once a side's ask collapses to $0.01 during active trading, the market has decisively judged that side as losing and it stays losing.
+
+Documented for future reference: trade-history analysis can overstate scalp viability by counting resolution-phase noise as real bounces. Any future scalp idea must constrain analysis to the active trading window explicitly.
+
+**Backtest config additions (v1.12.4):**
+- Strategy 45/46: RSI Fixed/Mart + TP=$0.87 with 25/75 thresholds — tested in response to live 53.7% win rate vs backtest 60.6%. Result: 25/75 wins win-rate by 0.4% but loses 43-47% PnL (fewer triggers, not higher quality per trigger). 30/70 stays optimal.
+
+**Project housekeeping:**
+- [x] Moved all generated HTMLs to `reports/` (gitignored).
+- [x] Archived dated logs to `logs/archive/`; only current-day log files remain in `logs/`.
+- [x] Live trader, orderbook recorder, and TUI run uninterrupted throughout reorganization.
+
+---
+
 ## v1.12 — Fixed-stake + hybrid TP-limit-sell + retry backoff + EMA filter (experimental) ✅ COMPLETE
 
 **Trader runtime — new modes:**
