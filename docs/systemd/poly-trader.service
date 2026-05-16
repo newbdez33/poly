@@ -10,6 +10,10 @@ User=ubuntu
 Group=ubuntu
 WorkingDirectory=/home/ubuntu/poly
 EnvironmentFile=/home/ubuntu/poly/.env
+# Clear any stale lock from a previous OOM-kill / crash. The trader writes
+# its lock as hostname:pid with no TTL, so a non-graceful exit leaves the
+# key behind and the next start would fail with "lock held".
+ExecStartPre=/usr/bin/redis-cli DEL poly:prod:trader:lock
 ExecStart=/home/ubuntu/poly/target/release/poly-trader \
   --direction up \
   --base 10 \

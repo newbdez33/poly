@@ -136,12 +136,12 @@ sudo journalctl -fu poly-trader   # tail logs
 
 ### Restarting after a rebuild
 
-`poly-trader` writes a Redis lock (`poly:prod:trader:lock`) on startup but does not release it on shutdown. A bare `systemctl restart` after rebuilding will fail with `Error: another poly-trader is running (lock held)` because the stale lock still names the old PID. Always:
+`poly-trader` writes a Redis lock (`poly:prod:trader:lock`) on startup but does not release it on shutdown. The bundled systemd unit handles this via `ExecStartPre=/usr/bin/redis-cli DEL poly:prod:trader:lock`, so `sudo systemctl restart poly-trader` self-heals.
+
+If you ever start the trader outside systemd (foreground, tmux) and crash it, clear the lock manually before relaunching:
 
 ```bash
 redis-cli DEL poly:prod:trader:lock
-sudo systemctl reset-failed poly-trader
-sudo systemctl restart poly-trader
 ```
 
 ### Remote monitoring (local TUI → remote trader)
