@@ -117,6 +117,10 @@ path = "src/bin/poly-orderbook-recorder.rs"
 name = "poly-orderbook-report"
 path = "src/bin/poly-orderbook-report.rs"
 
+[[bin]]
+name = "poly-status"
+path = "src/bin/poly-status.rs"
+
 [[test]]
 name = "backtest_smoke"
 path = "tests/backtest_smoke.rs"
