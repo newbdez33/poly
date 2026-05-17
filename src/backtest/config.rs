@@ -372,6 +372,47 @@ pub fn strategy_set() -> Vec<StrategyConfig> {
                 StakeRule::Fixed { stake: dec!(5) },
                 DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 })
         },
+        // v1.14: Martingale variant of current live strategy (32). Same RSI +
+        // TP=$0.83, but ladder doubles on loss. Live with base=10 = backtest
+        // base=$5 dollars at $0.50 entry.
+        with_signal("52_rsi_mart_tp83",
+            ExitRule::TpOnlyOrHold { tp_price: dec!(0.83) },
+            StakeRule::Martingale { base: dec!(5), max_step: 5 },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        // v1.15: band-width sweep on strategy 32 (RSI + TP=$0.83 + fixed stake).
+        // Investigates whether the default [0.45, 0.55] band is filtering out
+        // the most valuable RSI-extreme windows (where ask is far from $0.50
+        // precisely because the market is wrong about direction). Wider band
+        // = more entries; need to check if win rate holds.
+        StrategyConfig {
+            band_min: dec!(0.35), band_max: dec!(0.65),
+            ..with_signal("53_rsi_fixed_tp83_band3565",
+                ExitRule::TpOnlyOrHold { tp_price: dec!(0.83) },
+                StakeRule::Fixed { stake: dec!(5) },
+                DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 })
+        },
+        StrategyConfig {
+            band_min: dec!(0.25), band_max: dec!(0.75),
+            ..with_signal("54_rsi_fixed_tp83_band2575",
+                ExitRule::TpOnlyOrHold { tp_price: dec!(0.83) },
+                StakeRule::Fixed { stake: dec!(5) },
+                DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 })
+        },
+        StrategyConfig {
+            band_min: dec!(0.10), band_max: dec!(0.90),
+            ..with_signal("55_rsi_fixed_tp83_band1090",
+                ExitRule::TpOnlyOrHold { tp_price: dec!(0.83) },
+                StakeRule::Fixed { stake: dec!(5) },
+                DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 })
+        },
+        // No band — trade any ask in (0, 1). Lets RSI alone decide.
+        StrategyConfig {
+            band_min: dec!(0.001), band_max: dec!(0.999),
+            ..with_signal("56_rsi_fixed_tp83_noband",
+                ExitRule::TpOnlyOrHold { tp_price: dec!(0.83) },
+                StakeRule::Fixed { stake: dec!(5) },
+                DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 })
+        },
     ]
 }
 
@@ -410,7 +451,7 @@ mod tests {
         let mut names: Vec<&String> = s.iter().map(|c| &c.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 51);
+        assert_eq!(names.len(), 52);
     }
 
     #[test]
@@ -431,8 +472,8 @@ mod tests {
     #[test]
     fn filter_all_returns_everything() {
         let s = strategy_set();
-        assert_eq!(filter_strategies(&s, "all").len(), 51);
-        assert_eq!(filter_strategies(&s, "").len(), 51);
+        assert_eq!(filter_strategies(&s, "all").len(), 52);
+        assert_eq!(filter_strategies(&s, "").len(), 52);
     }
 
     #[test]
@@ -552,9 +593,9 @@ mod tests {
     }
 
     #[test]
-    fn strategy_set_has_fiftyone_strategies() {
+    fn strategy_set_has_fiftysix_strategies() {
         let s = strategy_set();
-        assert_eq!(s.len(), 51);
+        assert_eq!(s.len(), 56);
     }
 
     #[test]

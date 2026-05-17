@@ -18,6 +18,8 @@ ExecStart=/home/ubuntu/poly/target/release/poly-trader \
   --direction up \
   --base 10 \
   --max-step 5 \
+  --band-min 0.25 \
+  --band-max 0.75 \
   --exit-rule tp-sl \
   --tp-price 0.83 \
   --rsi-filter \
