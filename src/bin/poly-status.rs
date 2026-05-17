@@ -6,7 +6,7 @@
 //!   - poly:prod:balance:latest   ({usdc, fetched_at}, optional)
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset, Utc};
 use fred::interfaces::{ClientLike, KeysInterface, StreamsInterface};
 use fred::prelude::{RedisClient, RedisConfig};
 use poly_tui::trader::event::{EntryDecision, TraderEvent, TraderEventKind};
@@ -82,7 +82,7 @@ fn render(
     out.push_str("<header><h1>poly-trader status</h1>");
     out.push_str(&format!(
         "<div class='meta'>generated {} · auto-refresh 60s</div>",
-        now.format("%Y-%m-%d %H:%M:%S UTC")
+        jst(&now).format("%Y-%m-%d %H:%M:%S JST")
     ));
     out.push_str("</header>");
 
@@ -116,7 +116,7 @@ fn render(
             max = l.max_step,
             stake_mode = stake_mode,
             base = l.base_shares,
-            started = l.session_started_at.format("%Y-%m-%d %H:%M UTC"),
+            started = jst(&l.session_started_at).format("%Y-%m-%d %H:%M JST"),
             won = l.windows_won,
             lost = l.windows_lost,
             skipped = l.windows_skipped,
@@ -127,7 +127,7 @@ fn render(
             out.push_str(&format!(
                 "<div class='balance'>wallet ${} <span class='dim'>(fetched {})</span></div>",
                 fmt_decimal(b.usdc, 2),
-                b.fetched_at.format("%H:%M:%S UTC"),
+                jst(&b.fetched_at).format("%H:%M:%S JST"),
             ));
         }
         if let Some(stop) = &l.stopped {
@@ -142,11 +142,11 @@ fn render(
     }
 
     out.push_str("<section class='events'><h2>recent events</h2><table>");
-    out.push_str("<thead><tr><th>time (UTC)</th><th>event</th></tr></thead><tbody>");
+    out.push_str("<thead><tr><th>time (JST)</th><th>event</th></tr></thead><tbody>");
     for ev in events {
         out.push_str(&format!(
             "<tr><td class='ts'>{}</td><td>{}</td></tr>",
-            ev.ts.format("%m-%d %H:%M:%S"),
+            jst(&ev.ts).format("%m-%d %H:%M:%S"),
             event_label(&ev.kind),
         ));
     }
@@ -236,6 +236,10 @@ fn skip_reason_label(r: &SkipReason) -> String {
         SkipReason::RsiNeutralFilter { rsi } => format!("RSI={}", fmt_decimal(*rsi, 1)),
         SkipReason::RsiFetchFailed => "rsi-fetch-failed".into(),
     }
+}
+
+fn jst(t: &DateTime<Utc>) -> DateTime<FixedOffset> {
+    t.with_timezone(&FixedOffset::east_opt(9 * 3600).expect("9h offset is valid"))
 }
 
 fn format_money(d: Decimal) -> String {
