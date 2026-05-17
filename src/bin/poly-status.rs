@@ -314,6 +314,7 @@ section.events table { width:100%; border-collapse: collapse; font-size:12px; }
 section.events th { text-align:left; color:var(--dim); font-weight:500; padding:6px 8px; border-bottom:1px solid #21262d; text-transform:uppercase; letter-spacing:0.5px; font-size:10px; }
 section.events td { padding:5px 8px; border-bottom:1px dotted #21262d; font-variant-numeric: tabular-nums; }
 section.events td.ts { color:var(--dim); white-space:nowrap; width:120px; }
+section.events { overflow-x:auto; }
 .tag { display:inline-block; }
 .tag.win { color:var(--win); font-weight:600; }
 .tag.lose { color:var(--lose); font-weight:600; }
@@ -323,6 +324,19 @@ section.events td.ts { color:var(--dim); white-space:nowrap; width:120px; }
 .tag.skip { color:var(--dim); }
 .tag.dim { color:var(--dim); }
 footer { color:var(--dim); font-size:11px; margin-top:32px; text-align:center; }
+
+@media (max-width: 640px) {
+    body { padding:12px; font-size:13px; }
+    h1 { font-size:18px; }
+    section.ladder { padding:14px; }
+    .pnl { font-size:28px; }
+    .grid { grid-template-columns: 1fr; gap:4px; }
+    .grid > div { padding:6px 0; }
+    h2 { margin: 24px 0 8px; }
+    section.events th, section.events td { padding:6px 6px; font-size:11px; }
+    section.events td.ts { width:auto; font-size:10px; }
+    .balance { font-size:13px; }
+}
 </style>
 </head><body>"#;
 
