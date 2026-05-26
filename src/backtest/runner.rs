@@ -65,6 +65,7 @@ fn pick_direction_with_signal(
         DirectionSignal::Random { .. } => (fallback, false), // handled in run_strategy
         DirectionSignal::RsiWithTrendFilter { .. } => (fallback, false), // handled in run_strategy
         DirectionSignal::LateMomentum { .. } => (fallback, false), // handled in run_strategy
+        DirectionSignal::IntraWindowMomentum { .. } => (fallback, false), // handled in run_strategy
     }
 }
 
@@ -190,6 +191,99 @@ fn simulate_late_momentum(
     }
 }
 
+/// v1.16 IntraWindowMomentum: scan 1Hz from `scan_start_secs` to
+/// `scan_end_secs` looking for BTC to deviate `[bp_min, bp_max]` basis points
+/// from `price_to_beat`. On trigger, enter the SAME side as the move
+/// (momentum). Apply the configured exit rule.
+fn simulate_intra_window_reversion(
+    window: &crate::backtest::data::gamma_history::WindowMeta,
+    btc: Option<&crate::backtest::data::binance::BinanceData>,
+    oracle: &dyn crate::backtest::oracle::TokenPriceOracle,
+    stake: Decimal,
+    scan_start_secs: u32,
+    scan_end_secs: u32,
+    bp_min: i32,
+    bp_max: i32,
+    exit_rule: &crate::backtest::config::ExitRule,
+) -> WindowOutcome {
+    use rust_decimal_macros::dec;
+    use rust_decimal::prelude::ToPrimitive;
+
+    let (Some(btc), Some(ptb)) = (btc, window.price_to_beat.to_f64()) else {
+        return WindowOutcome::Skipped { reason: SkipReason::GammaApiUnavailable };
+    };
+    if ptb <= 0.0 {
+        return WindowOutcome::Skipped { reason: SkipReason::PriceOutsideBand { ask: Decimal::ZERO } };
+    }
+
+    let mut trigger: Option<(u32, Direction)> = None;
+    for t in scan_start_secs..=scan_end_secs {
+        let ts = window.window_ts + t as i64;
+        let Some(current_btc) = btc.price_at(ts) else { continue };
+        let bp = ((current_btc - ptb) / ptb) * 10_000.0;
+        let abs_bp = bp.abs();
+        if abs_bp < bp_min as f64 || abs_bp > bp_max as f64 {
+            continue;
+        }
+        // Bet WITH the direction BTC has moved (momentum).
+        let dir = if bp > 0.0 { Direction::Up } else { Direction::Down };
+        trigger = Some((t, dir));
+        break;
+    }
+    let Some((entry_offset, direction)) = trigger else {
+        return WindowOutcome::Skipped { reason: SkipReason::PriceOutsideBand { ask: Decimal::ZERO } };
+    };
+
+    let (up_bid, up_ask) = oracle.price_at(window, entry_offset);
+    let ask = match direction {
+        Direction::Up => up_ask,
+        Direction::Down => (Decimal::ONE - up_bid).max(Decimal::ZERO),
+    };
+    if ask <= Decimal::ZERO {
+        return WindowOutcome::Skipped { reason: SkipReason::PriceOutsideBand { ask } };
+    }
+    let shares = (stake / ask).floor();
+    if shares < dec!(5) {
+        return WindowOutcome::Skipped { reason: SkipReason::FillOrKillFailed };
+    }
+    let dollars_spent = shares * ask;
+
+    use crate::backtest::config::ExitRule;
+    let resolve_outcome = || -> WindowOutcome {
+        let our_won = window.winner == Some(direction);
+        if our_won {
+            WindowOutcome::Won { proceeds_usd: shares * dec!(1.00), cost_usd: dollars_spent }
+        } else {
+            WindowOutcome::Lost { spent_usd: dollars_spent }
+        }
+    };
+
+    match exit_rule {
+        ExitRule::HoldToResolution => resolve_outcome(),
+        ExitRule::TpOnlyOrHold { tp_price } => {
+            // Backtest only handles 5-min windows; hardcode 300s.
+            let window_end_t: u32 = 300;
+            for t in (entry_offset + 1)..=window_end_t {
+                let (up_bid_t, _up_ask_t) = oracle.price_at(window, t);
+                let our_bid = match direction {
+                    Direction::Up => up_bid_t,
+                    Direction::Down => (Decimal::ONE - up_bid_t).max(Decimal::ZERO),
+                };
+                if our_bid >= *tp_price {
+                    let proceeds = shares * *tp_price;
+                    if proceeds > dollars_spent {
+                        return WindowOutcome::Won { proceeds_usd: proceeds, cost_usd: dollars_spent };
+                    } else {
+                        return WindowOutcome::Lost { spent_usd: dollars_spent - proceeds };
+                    }
+                }
+            }
+            resolve_outcome()
+        }
+        _ => resolve_outcome(),
+    }
+}
+
 pub fn run_strategy(
     strategy: &StrategyConfig,
     windows: &[WindowMeta],
@@ -288,6 +382,24 @@ pub fn run_strategy_with_opts(
         // v1.14: LateMomentum is handled completely separately — it enters
         // mid-window (not t=0) and uses chainlink-based outcome rather than
         // walking the oracle. Short-circuit here before the t=0 entry path.
+        if let Some(DirectionSignal::IntraWindowMomentum { scan_start_secs, scan_end_secs, bp_min, bp_max }) = &strategy.direction_signal {
+            let outcome = simulate_intra_window_reversion(
+                window, btc, oracle, stake,
+                *scan_start_secs, *scan_end_secs, *bp_min, *bp_max,
+                &strategy.exit,
+            );
+            prev_winner = window.winner;
+            ladder = apply_outcome(&ladder, &outcome, Utc::now());
+            session_pnl = ladder.realized_pnl_usd;
+            history.push(WindowResult {
+                window_ts: window.window_ts, stake, outcome,
+                ladder_step_before: step_before,
+                ladder_step_after: ladder.current_step,
+                ladder_pnl_after: total_pnl + session_pnl,
+            });
+            continue;
+        }
+
         if let Some(DirectionSignal::LateMomentum { entry_offset_secs, threshold_dollars }) = &strategy.direction_signal {
             let outcome = simulate_late_momentum(
                 window, btc, oracle, stake,
@@ -360,7 +472,8 @@ pub fn run_strategy_with_opts(
                     }
                     DirectionSignal::Random { .. }
                     | DirectionSignal::RsiWithTrendFilter { .. }
-                    | DirectionSignal::LateMomentum { .. } => None,
+                    | DirectionSignal::LateMomentum { .. }
+                    | DirectionSignal::IntraWindowMomentum { .. } => None,
                 });
                 pick_direction_with_signal(signal, rsi, prev_winner, strategy.direction)
             }

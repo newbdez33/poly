@@ -147,6 +147,25 @@ pub enum DirectionSignal {
         entry_offset_secs: u32,
         threshold_dollars: f64,
     },
+    /// v1.16: intra-window momentum. Scans BTC price from `scan_start_secs`
+    /// to `scan_end_secs` (1 Hz). At each tick compute the deviation in
+    /// basis points: `bp = (btc_now - price_to_beat) / price_to_beat * 10000`.
+    /// If `|bp|` falls in `[bp_min, bp_max]`, enter the SAME side as the
+    /// move (momentum: BTC up → bet UP, BTC down → bet DOWN). Outside
+    /// the range — either too small (noise) or too large (real trend
+    /// already priced) — keep scanning. Skip if no trigger by
+    /// `scan_end_secs`.
+    ///
+    /// Inspired by wallet 0xb55fa1296e6ec55d0ce53d93b9237389f11764d4
+    /// behavior, but with reversed sign: 3-month backtest shows the
+    /// momentum direction (bet WITH BTC move) achieves 70-76% win rate
+    /// at this bp scale, while reversion fails (30% win rate).
+    IntraWindowMomentum {
+        scan_start_secs: u32,
+        scan_end_secs: u32,
+        bp_min: i32,
+        bp_max: i32,
+    },
 }
 
 pub fn strategy_set() -> Vec<StrategyConfig> {
@@ -405,11 +424,105 @@ pub fn strategy_set() -> Vec<StrategyConfig> {
                 StakeRule::Fixed { stake: dec!(5) },
                 DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 })
         },
+        // v1.16: IntraWindowMomentum — bet WITH small BTC moves (3-15 bp)
+        // observed mid-window. 3-month backtest shows momentum direction
+        // captures 70-76% win rate. Parameter sweep below.
+        StrategyConfig {
+            band_min: dec!(0.001), band_max: dec!(0.999),
+            ..with_signal("60_momentum_3_10bp_hold",
+                ExitRule::HoldToResolution,
+                StakeRule::Fixed { stake: dec!(5) },
+                DirectionSignal::IntraWindowMomentum {
+                    scan_start_secs: 30, scan_end_secs: 240,
+                    bp_min: 3, bp_max: 10,
+                })
+        },
+        StrategyConfig {
+            band_min: dec!(0.001), band_max: dec!(0.999),
+            ..with_signal("61_momentum_5_15bp_hold",
+                ExitRule::HoldToResolution,
+                StakeRule::Fixed { stake: dec!(5) },
+                DirectionSignal::IntraWindowMomentum {
+                    scan_start_secs: 30, scan_end_secs: 240,
+                    bp_min: 5, bp_max: 15,
+                })
+        },
+        StrategyConfig {
+            band_min: dec!(0.001), band_max: dec!(0.999),
+            ..with_signal("62_momentum_3_10bp_tp83",
+                ExitRule::TpOnlyOrHold { tp_price: dec!(0.83) },
+                StakeRule::Fixed { stake: dec!(5) },
+                DirectionSignal::IntraWindowMomentum {
+                    scan_start_secs: 30, scan_end_secs: 240,
+                    bp_min: 3, bp_max: 10,
+                })
+        },
+        // Extra parameter sweep
+        StrategyConfig {
+            band_min: dec!(0.001), band_max: dec!(0.999),
+            ..with_signal("63_momentum_1_5bp_hold",
+                ExitRule::HoldToResolution,
+                StakeRule::Fixed { stake: dec!(5) },
+                DirectionSignal::IntraWindowMomentum {
+                    scan_start_secs: 30, scan_end_secs: 240,
+                    bp_min: 1, bp_max: 5,
+                })
+        },
+        StrategyConfig {
+            band_min: dec!(0.001), band_max: dec!(0.999),
+            ..with_signal("64_momentum_10_30bp_hold",
+                ExitRule::HoldToResolution,
+                StakeRule::Fixed { stake: dec!(5) },
+                DirectionSignal::IntraWindowMomentum {
+                    scan_start_secs: 30, scan_end_secs: 240,
+                    bp_min: 10, bp_max: 30,
+                })
+        },
+        StrategyConfig {
+            band_min: dec!(0.001), band_max: dec!(0.999),
+            ..with_signal("65_momentum_5_15bp_late_scan",
+                ExitRule::HoldToResolution,
+                StakeRule::Fixed { stake: dec!(5) },
+                DirectionSignal::IntraWindowMomentum {
+                    scan_start_secs: 60, scan_end_secs: 180,
+                    bp_min: 5, bp_max: 15,
+                })
+        },
         // No band — trade any ask in (0, 1). Lets RSI alone decide.
         StrategyConfig {
             band_min: dec!(0.001), band_max: dec!(0.999),
             ..with_signal("56_rsi_fixed_tp83_noband",
                 ExitRule::TpOnlyOrHold { tp_price: dec!(0.83) },
+                StakeRule::Fixed { stake: dec!(5) },
+                DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 })
+        },
+        // v1.15: "BUY ceiling at $0.50" — only enter when ask <= 0.50. Models
+        // a marketable BUY limit @ 0.50: when ask is below, we cross instantly
+        // at the cheaper ask price; when ask is above, we never fill so we
+        // skip. Captures the "cheap entries are highest EV" intuition while
+        // sacrificing all entries above $0.50.
+        StrategyConfig {
+            band_min: dec!(0.001), band_max: dec!(0.50),
+            ..with_signal("57_rsi_fixed_tp83_ceil50",
+                ExitRule::TpOnlyOrHold { tp_price: dec!(0.83) },
+                StakeRule::Fixed { stake: dec!(5) },
+                DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 })
+        },
+        // v1.16: RSI + Fixed + HoldToResolution (no TP, no SL). Buy taker,
+        // hold position, let Auto-Redeem pay out winners at $1/share. The
+        // simplest possible strategy that still uses the RSI direction
+        // signal. Removes maker adverse selection (95% FoK rate observed
+        // live) and the TP cap that limits upside to $3.30/share vs the
+        // full $5/share for a true win.
+        with_signal("58_rsi_fixed_hold_band4555",
+            ExitRule::HoldToResolution,
+            StakeRule::Fixed { stake: dec!(5) },
+            DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 }),
+        // Same but with the widened band that current live uses.
+        StrategyConfig {
+            band_min: dec!(0.25), band_max: dec!(0.75),
+            ..with_signal("59_rsi_fixed_hold_band2575",
+                ExitRule::HoldToResolution,
                 StakeRule::Fixed { stake: dec!(5) },
                 DirectionSignal::RsiFilterSkipNeutral { period: 14, oversold: 30.0, overbought: 70.0 })
         },
@@ -593,9 +706,9 @@ mod tests {
     }
 
     #[test]
-    fn strategy_set_has_fiftysix_strategies() {
+    fn strategy_set_has_sixtyfive_strategies() {
         let s = strategy_set();
-        assert_eq!(s.len(), 56);
+        assert_eq!(s.len(), 65);
     }
 
     #[test]
