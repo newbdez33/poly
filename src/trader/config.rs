@@ -92,6 +92,23 @@ pub struct TraderArgs {
     pub rsi_oversold: f64,
     #[arg(long, default_value = "70.0")]
     pub rsi_overbought: f64,
+    /// v1.16: enable IntraWindowMomentum direction gate (strategy 61).
+    /// Scans BTC price 1Hz from `--intra-scan-start-secs` to
+    /// `--intra-scan-end-secs`. On the first tick where |bp deviation|
+    /// from window-open BTC price is in `[--intra-bp-min, --intra-bp-max]`,
+    /// enter the SAME side as the move (momentum). Skip window if no
+    /// trigger by end of scan. Mutually exclusive with `--rsi-filter`.
+    /// Recommended exit rule: `hold` (let Auto-Redeem pay out).
+    #[arg(long)]
+    pub intra_momentum: bool,
+    #[arg(long, default_value = "30")]
+    pub intra_scan_start_secs: u32,
+    #[arg(long, default_value = "240")]
+    pub intra_scan_end_secs: u32,
+    #[arg(long, default_value = "5")]
+    pub intra_bp_min: i32,
+    #[arg(long, default_value = "15")]
+    pub intra_bp_max: i32,
 }
 
 impl TraderArgs {
@@ -132,6 +149,21 @@ impl TraderArgs {
             if self.rsi_oversold <= 0.0 || self.rsi_oversold >= self.rsi_overbought
                || self.rsi_overbought >= 100.0 {
                 return Err(ConfigError::RsiThresholdsInvalid);
+            }
+        }
+        if self.intra_momentum {
+            if self.rsi_filter {
+                return Err(ConfigError::IntraMomentumConflictsRsi);
+            }
+            if self.intra_scan_start_secs >= self.intra_scan_end_secs {
+                return Err(ConfigError::IntraScanRangeInverted);
+            }
+            if self.intra_bp_min <= 0 || self.intra_bp_max <= self.intra_bp_min {
+                return Err(ConfigError::IntraBpRangeInvalid);
+            }
+            let window_secs = self.window_minutes * 60;
+            if self.intra_scan_end_secs >= window_secs - 30 {
+                return Err(ConfigError::IntraScanRangeInverted);
             }
         }
         let window_seconds = (self.window_minutes as u32) * 60;
@@ -195,6 +227,12 @@ pub enum ConfigError {
     TpLimitSellRequiresTpSl,
     #[error("--tp-limit-sell and --maker are mutually exclusive")]
     TpLimitSellConflictsWithMaker,
+    #[error("--intra-momentum and --rsi-filter are mutually exclusive")]
+    IntraMomentumConflictsRsi,
+    #[error("--intra-scan-start-secs must be less than --intra-scan-end-secs (and end < window-seconds - 30)")]
+    IntraScanRangeInverted,
+    #[error("--intra-bp-min and --intra-bp-max must satisfy 0 < bp_min < bp_max")]
+    IntraBpRangeInvalid,
 }
 
 #[cfg(test)]

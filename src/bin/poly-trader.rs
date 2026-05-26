@@ -23,6 +23,7 @@ use poly_tui::trader::order_events::{OrderEventStream, PolymarketPollOrderEvents
 use poly_tui::trader::price::MidwindowPriceFetcher;
 use poly_tui::trader::resolver::{PolymarketResolver, WindowResolver};
 use poly_tui::trader::rsi_gate::{LiveBinanceFetcher, RsiDecision, RsiGate};
+use poly_tui::trader::momentum_gate::{MomentumGate, MomentumGateConfig, MomentumDecision};
 use poly_tui::trader::scheduler::{run, SchedulerConfig, SchedulerDeps, WindowExecutor};
 use poly_tui::trader::state::TraderStateStore;
 use poly_tui::trader::window::{run_window, WindowConfig, WindowDeps};
@@ -207,6 +208,25 @@ async fn main() -> Result<()> {
             inner: base_exec,
             gate: Arc::new(gate),
         })
+    } else if args.intra_momentum {
+        tracing::info!(
+            "IntraWindowMomentum gate enabled: scan {}..{}s, bp [{}, {}]",
+            args.intra_scan_start_secs, args.intra_scan_end_secs,
+            args.intra_bp_min, args.intra_bp_max,
+        );
+        let gate = MomentumGate::new(
+            MomentumGateConfig {
+                scan_start_secs: args.intra_scan_start_secs,
+                scan_end_secs: args.intra_scan_end_secs,
+                bp_min: args.intra_bp_min,
+                bp_max: args.intra_bp_max,
+            },
+            btc_price.clone(),
+        );
+        Arc::new(MomentumGatedExec {
+            inner: base_exec,
+            gate: Arc::new(gate),
+        })
     } else {
         base_exec
     };
@@ -278,6 +298,46 @@ impl WindowExecutor for RsiGatedExec {
                     overridden.direction = direction;
                     self.inner.execute(&overridden, window_ts).await
                 }
+            }
+        }
+    }
+}
+
+/// v1.16: IntraWindowMomentum-gating wrapper. Waits inside the window until
+/// BTC has moved into the configured bp range, then triggers entry with
+/// direction matching the move.
+struct MomentumGatedExec {
+    inner: Arc<dyn WindowExecutor>,
+    gate: Arc<MomentumGate>,
+}
+
+#[async_trait::async_trait]
+impl WindowExecutor for MomentumGatedExec {
+    async fn execute(&self, ladder: &LadderState, window_ts: i64) -> WindowOutcome {
+        let decision = self.gate.decide(window_ts).await;
+        match decision {
+            MomentumDecision::Skip => {
+                tracing::info!("momentum-gate: skip (no trigger) window={}", window_ts);
+                WindowOutcome::Skipped {
+                    reason: poly_tui::trader::ladder::SkipReason::PriceOutsideBand {
+                        ask: rust_decimal::Decimal::ZERO,
+                    },
+                }
+            }
+            MomentumDecision::FetchFailed => {
+                tracing::warn!("momentum-gate: skip (btc feed failed) window={}", window_ts);
+                WindowOutcome::Skipped {
+                    reason: poly_tui::trader::ladder::SkipReason::RsiFetchFailed,
+                }
+            }
+            MomentumDecision::Trade { direction, bp, t_offset } => {
+                tracing::info!(
+                    "momentum-gate: trade {:?} bp={:.2} t+{}s window={}",
+                    direction, bp, t_offset, window_ts,
+                );
+                let mut overridden = ladder.clone();
+                overridden.direction = direction;
+                self.inner.execute(&overridden, window_ts).await
             }
         }
     }

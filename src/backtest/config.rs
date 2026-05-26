@@ -564,7 +564,7 @@ mod tests {
         let mut names: Vec<&String> = s.iter().map(|c| &c.name).collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 52);
+        assert_eq!(names.len(), 65);
     }
 
     #[test]
@@ -585,8 +585,8 @@ mod tests {
     #[test]
     fn filter_all_returns_everything() {
         let s = strategy_set();
-        assert_eq!(filter_strategies(&s, "all").len(), 52);
-        assert_eq!(filter_strategies(&s, "").len(), 52);
+        assert_eq!(filter_strategies(&s, "all").len(), 65);
+        assert_eq!(filter_strategies(&s, "").len(), 65);
     }
 
     #[test]
